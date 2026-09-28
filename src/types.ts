@@ -204,3 +204,74 @@ export interface ClientActivityLogEntry {
   };
 }
 
+// ==========================================
+// Customer Gallery & Photo Selection Types
+// ==========================================
+
+export type CustomerGalleryStatus =
+  | 'draft'
+  | 'active'
+  | 'selection_in_progress'
+  | 'submitted'
+  | 'locked'
+  | 'expired'
+  | 'disabled';
+
+export interface CustomerGalleryPhoto {
+  id: string; // Drive file ID
+  driveFileId: string;
+  name: string;
+  thumbnailUrl: string;
+  previewUrl: string;
+  mimeType?: string;
+  size?: string;
+  width?: number;
+  height?: number;
+  createdTime?: string;
+  folderId?: string;
+}
+
+export interface CustomerPhotoSelection {
+  photoId: string;
+  driveFileId: string;
+  fileName: string;
+  thumbnailUrl?: string;
+  selectedAt: string;
+  selectionOrder: number;
+}
+
+export interface CustomerGallery {
+  id: string;
+  ownerUid?: string;
+  customerName: string;
+  eventName: string;
+  galleryName: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  driveFolderId: string;
+  driveFolderName: string;
+  secureToken: string; // e.g. 'A8kP9mQ72xRt4Lw'
+  pinEnabled: boolean;
+  pinHash?: string; // SHA-256 hashed PIN
+  maxSelections: number; // e.g. 100
+  selectionDeadline: string; // e.g. '2026-10-15'
+  allowDownloads: boolean;
+  allowEditing: boolean;
+  status: CustomerGalleryStatus;
+  totalPhotos: number;
+  selectedCount: number;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+  photos?: CustomerGalleryPhoto[];
+  selectedPhotoIds?: string[];
+  selections?: CustomerPhotoSelection[];
+  coverPhotoUrl?: string;
+  notesForCustomer?: string;
+  includeSubfolders?: boolean;
+  lastActivity?: string;
+  driveAccount?: string;
+  collectedFolderId?: string; // Created 'Customer Selected' Google Drive folder ID
+}
+
+

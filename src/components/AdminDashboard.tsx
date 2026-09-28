@@ -38,8 +38,10 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
-import { Album, ClientSelectionSubmission, SubmissionStatus } from '../types';
+import { Album, ClientSelectionSubmission, SubmissionStatus, CustomerGallery } from '../types';
 import { CreateAlbumModal } from './CreateAlbumModal';
+import { CreateCustomerGalleryModal } from './CreateCustomerGalleryModal';
+import { CustomerGalleriesPanel } from './CustomerGalleriesPanel';
 import { ClientSubmissionsViewer } from './ClientSubmissionsViewer';
 import { AnalyticsPanel } from './AnalyticsPanel';
 import { AdminPaymentVerificationPanel } from './AdminPaymentVerificationPanel';
@@ -68,6 +70,7 @@ interface AdminDashboardProps {
   onCreateAlbum: (album: Album) => void;
   onDeleteAlbum: (albumId: string) => void;
   onViewAsClient: (album: Album) => void;
+  onOpenCustomerGalleryView?: (gallery: CustomerGallery) => void;
   onRefreshData: () => void;
 }
 
@@ -81,16 +84,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onCreateAlbum,
   onDeleteAlbum,
   onViewAsClient,
+  onOpenCustomerGalleryView,
   onRefreshData,
 }) => {
   const [selectedAlbumForDetails, setSelectedAlbumForDetails] = useState<Album | null>(
     albums.length > 0 ? albums[0] : null
   );
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isCreateCustomerGalleryModalOpen, setIsCreateCustomerGalleryModalOpen] = useState(false);
   const [copiedAlbumId, setCopiedAlbumId] = useState<string | null>(null);
   const [syncingAlbumId, setSyncingAlbumId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'albums' | 'submissions' | 'payments' | 'analytics'>('albums');
+  const [activeTab, setActiveTab] = useState<'customer_galleries' | 'albums' | 'submissions' | 'payments' | 'analytics'>('customer_galleries');
   const [submissionSearch, setSubmissionSearch] = useState('');
   const [submissionStatusFilter, setSubmissionStatusFilter] = useState<'all' | 'completed' | 'in_progress'>('all');
   const [downloadingSubId, setDownloadingSubId] = useState<string | null>(null);
@@ -332,11 +337,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span className="sm:hidden">Gateway</span>
             </button>
 
+            {/* Create Customer Gallery Button */}
             <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="px-4 py-2 bg-linear-to-r from-amber-500 to-rose-500 hover:opacity-95 text-stone-950 font-semibold text-xs rounded-xl transition shadow-lg flex items-center gap-2"
+              onClick={() => setIsCreateCustomerGalleryModalOpen(true)}
+              className="px-4 py-2 bg-linear-to-r from-amber-500 to-amber-600 hover:opacity-95 text-stone-950 font-bold text-xs rounded-xl transition shadow-lg flex items-center gap-1.5 cursor-pointer"
             >
               <FolderPlus className="w-4 h-4" />
+              <span>+ Create Gallery</span>
+            </button>
+
+            <button
+              onClick={() => setIsCreateModalOpen(true)}
+              className="px-3.5 py-2 bg-stone-900 hover:bg-stone-850 border border-stone-750 text-stone-300 hover:text-stone-100 font-semibold text-xs rounded-xl transition flex items-center gap-2"
+            >
+              <Camera className="w-4 h-4 text-amber-400" />
               <span>Create Album</span>
             </button>
           </div>
@@ -347,6 +361,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 sm:py-8 flex-1 flex flex-col gap-8">
         {/* Metric Cards Banner */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+          <div
+            onClick={() => setActiveTab('customer_galleries')}
+            className={`p-4 rounded-2xl flex items-center gap-3 cursor-pointer transition border ${
+              activeTab === 'customer_galleries'
+                ? 'bg-stone-850 border-amber-500/60 shadow-lg'
+                : 'bg-stone-900/60 border-stone-800 hover:bg-stone-900/90'
+            }`}
+            title="Click to view Customer Photo Selection Galleries"
+          >
+            <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-xl font-semibold font-serif text-stone-100">Customer</p>
+              <p className="text-xs text-stone-400">Galleries & Selection</p>
+            </div>
+          </div>
+
           <div
             onClick={() => setActiveTab('albums')}
             className={`p-4 rounded-2xl flex items-center gap-3 cursor-pointer transition border ${
@@ -456,6 +488,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-850 pb-3">
           <div className="flex flex-wrap items-center gap-2">
             <button
+              onClick={() => setActiveTab('customer_galleries')}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 cursor-pointer ${
+                activeTab === 'customer_galleries'
+                  ? 'bg-amber-500 text-stone-950 font-bold shadow-md'
+                  : 'text-stone-300 hover:text-stone-100 hover:bg-stone-900/60'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Customer Galleries</span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('albums')}
               className={`px-4 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${
                 activeTab === 'albums'
@@ -519,12 +563,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               ? 'bKash, Nagad ও Rocket Transaction ID যাচাই, অনুমোদন এবং ফটো ডাউনলোড পারমিশন পরিচালনা'
               : activeTab === 'analytics'
               ? 'Visualize most selected photos, client preferences, and popularity rankings'
+              : activeTab === 'customer_galleries'
+              ? 'Create, manage and track customer wedding photo selection galleries with secure links'
               : 'Manage albums, Google Drive sync, and proofing limits'}
           </div>
         </div>
 
-        {/* Dynamic View: Payments vs Analytics vs Submissions vs Master-Detail Albums */}
-        {activeTab === 'payments' ? (
+        {/* Dynamic View: Customer Galleries vs Payments vs Analytics vs Submissions vs Master-Detail Albums */}
+        {activeTab === 'customer_galleries' ? (
+          <CustomerGalleriesPanel
+            accessToken={accessToken}
+            onNeedGoogleSignIn={onSignIn}
+            onOpenCustomerView={(gallery) => {
+              if (onOpenCustomerGalleryView) {
+                onOpenCustomerGalleryView(gallery);
+              }
+            }}
+          />
+        ) : activeTab === 'payments' ? (
           <AdminPaymentVerificationPanel
             albums={albums}
             paymentRequests={paymentRequests}
@@ -1319,6 +1375,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         senderName={user?.displayName || 'রম্যছবি - RamyaChobi Photography'}
         onClose={() => setIsEmailModalOpen(false)}
         onNotificationSent={handleNotificationSent}
+      />
+
+      {/* Create Customer Gallery Modal */}
+      <CreateCustomerGalleryModal
+        isOpen={isCreateCustomerGalleryModalOpen}
+        onClose={() => setIsCreateCustomerGalleryModalOpen(false)}
+        onCreated={() => {
+          setIsCreateCustomerGalleryModalOpen(false);
+          setActiveTab('customer_galleries');
+        }}
+        accessToken={accessToken}
+        onNeedGoogleSignIn={onSignIn}
       />
 
       {/* Integrate Payment Gateway Modal (Stripe & SSLCommerz) */}

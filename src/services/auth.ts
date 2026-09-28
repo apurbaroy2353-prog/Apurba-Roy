@@ -7,11 +7,13 @@ import {
   User,
   signOut,
 } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Single Firebase App instance
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
+export const db = getFirestore(app);
 
 // Desired Google Drive scopes (readonly for full drive browsing & search, file for creating non-destructive CLIENT SELECTED folder)
 export const SCOPES = [
@@ -46,6 +48,50 @@ export const isTokenExpired = (): boolean => {
   return false;
 };
 
+export interface PhotographerDriveConnection {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  driveConnected: boolean;
+  lastConnectedAt: string;
+  scopes: string[];
+}
+
+export const savePhotographerDriveConnection = async (user: User): Promise<void> => {
+  try {
+    const userDocRef = doc(db, 'photographerProfiles', user.uid);
+    await setDoc(
+      userDocRef,
+      {
+        uid: user.uid,
+        email: user.email,
+        displayName: user.displayName,
+        driveConnected: true,
+        lastConnectedAt: new Date().toISOString(),
+        scopes: SCOPES,
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Could not save photographer drive connection profile to Firestore:', err);
+  }
+};
+
+export const getPhotographerDriveConnection = async (
+  uid: string
+): Promise<PhotographerDriveConnection | null> => {
+  try {
+    const userDocRef = doc(db, 'photographerProfiles', uid);
+    const snap = await getDoc(userDocRef);
+    if (snap.exists()) {
+      return snap.data() as PhotographerDriveConnection;
+    }
+  } catch (err) {
+    console.warn('Could not fetch photographer drive profile from Firestore:', err);
+  }
+  return null;
+};
+
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
@@ -75,6 +121,10 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
     cachedAccessToken = credential.accessToken;
     tokenExpiresAt = Date.now() + 3500 * 1000;
+
+    // Account-based Google Drive persistence across browsers
+    await savePhotographerDriveConnection(result.user);
+
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Google Sign In error:', error);

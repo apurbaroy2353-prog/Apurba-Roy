@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "customerGallery": {
+      "title": "Customer Gallery",
+      "description": "A client photo-selection gallery created by a photographer linked to Google Drive photos with a secure access token.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "eventName": { "type": "string" },
+        "galleryName": { "type": "string" },
+        "driveFolderId": { "type": "string" },
+        "driveFolderName": { "type": "string" },
+        "secureToken": { "type": "string" },
+        "pinEnabled": { "type": "boolean" },
+        "pinHash": { "type": "string" },
+        "maxSelections": { "type": "number" },
+        "selectionDeadline": { "type": "string" },
+        "allowDownloads": { "type": "boolean" },
+        "allowEditing": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "active", "selection_in_progress", "submitted", "locked", "expired", "disabled"]
+        },
+        "totalPhotos": { "type": "number" },
+        "selectedCount": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "submittedAt": { "type": "string" }
+      },
+      "required": ["customerName", "eventName", "galleryName", "driveFolderId", "secureToken", "status"]
+    },
+    "customerSelection": {
+      "title": "Customer Photo Selection",
+      "description": "Selected photo record submitted by customer for a gallery.",
+      "type": "object",
+      "properties": {
+        "photoId": { "type": "string" },
+        "driveFileId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "selectedAt": { "type": "string" },
+        "selectionOrder": { "type": "number" }
+      },
+      "required": ["photoId", "driveFileId", "fileName", "selectedAt"]
+    }
+  },
+  "firestore": {
+    "/customerGalleries/{galleryId}": {
+      "schema": "customerGallery",
+      "description": "Stores customer proofing galleries created by photographers."
+    },
+    "/customerGalleries/{galleryId}/selections/{selectionId}": {
+      "schema": "customerSelection",
+      "description": "Individual photo selections submitted for a gallery."
+    }
+  }
+}
