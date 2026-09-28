@@ -14,7 +14,7 @@ export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 
 // Desired Google Drive scopes
-export const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
+export const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
 const provider = new GoogleAuthProvider();
 SCOPES.forEach((scope) => provider.addScope(scope));
