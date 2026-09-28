@@ -61,6 +61,8 @@ export const CreateCustomerGalleryModal: React.FC<CreateCustomerGalleryModalProp
   const [pin, setPin] = useState('');
   const [allowDownload, setAllowDownload] = useState(false);
   const [allowEditing, setAllowEditing] = useState(false);
+  const [askCustomerName, setAskCustomerName] = useState(false);
+  const [askCustomerPhone, setAskCustomerPhone] = useState(false);
   const [status, setStatus] = useState<CustomerGalleryStatus>('active');
   const [notesForCustomer, setNotesForCustomer] = useState(
     'Please select your favorite photos for your album. Click any photo to preview in high quality.'
@@ -161,6 +163,8 @@ export const CreateCustomerGalleryModal: React.FC<CreateCustomerGalleryModalProp
         selectionDeadline,
         allowDownloads: allowDownload,
         allowEditing,
+        askCustomerName,
+        askCustomerPhone,
         status,
         totalPhotos: mappedPhotos.length || 0,
         selectedCount: 0,
@@ -631,6 +635,44 @@ export const CreateCustomerGalleryModal: React.FC<CreateCustomerGalleryModalProp
                   type="checkbox"
                   checked={allowEditing}
                   onChange={(e) => setAllowEditing(e.target.checked)}
+                  className="w-4 h-4 accent-amber-500 cursor-pointer"
+                />
+              </div>
+
+              {/* Ask Customer Name Toggle */}
+              <div className="p-3.5 rounded-xl bg-stone-950 border border-stone-850 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-stone-200 flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Ask Customer Name</span>
+                  </p>
+                  <p className="text-[11px] text-stone-400">
+                    Prompt client for their name on first visit (no account required)
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={askCustomerName}
+                  onChange={(e) => setAskCustomerName(e.target.checked)}
+                  className="w-4 h-4 accent-amber-500 cursor-pointer"
+                />
+              </div>
+
+              {/* Ask Mobile Number Toggle */}
+              <div className="p-3.5 rounded-xl bg-stone-950 border border-stone-850 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-stone-200 flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Ask Mobile Number</span>
+                  </p>
+                  <p className="text-[11px] text-stone-400">
+                    Prompt client for their phone number on first visit to identify session
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={askCustomerPhone}
+                  onChange={(e) => setAskCustomerPhone(e.target.checked)}
                   className="w-4 h-4 accent-amber-500 cursor-pointer"
                 />
               </div>

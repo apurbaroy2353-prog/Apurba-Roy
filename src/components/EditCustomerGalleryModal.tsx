@@ -32,6 +32,8 @@ export const EditCustomerGalleryModal: React.FC<EditCustomerGalleryModalProps> =
   const [status, setStatus] = useState<CustomerGalleryStatus>(gallery.status);
   const [allowDownloads, setAllowDownloads] = useState(gallery.allowDownloads);
   const [allowEditing, setAllowEditing] = useState(gallery.allowEditing);
+  const [askCustomerName, setAskCustomerName] = useState(gallery.askCustomerName || false);
+  const [askCustomerPhone, setAskCustomerPhone] = useState(gallery.askCustomerPhone || false);
   const [notesForCustomer, setNotesForCustomer] = useState(gallery.notesForCustomer || '');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +62,8 @@ export const EditCustomerGalleryModal: React.FC<EditCustomerGalleryModalProps> =
         status,
         allowDownloads,
         allowEditing,
+        askCustomerName,
+        askCustomerPhone,
         notesForCustomer: notesForCustomer.trim(),
         updatedAt: new Date().toISOString(),
       };
@@ -198,6 +202,32 @@ export const EditCustomerGalleryModal: React.FC<EditCustomerGalleryModalProps> =
                 type="checkbox"
                 checked={allowEditing}
                 onChange={(e) => setAllowEditing(e.target.checked)}
+                className="w-4 h-4 accent-amber-500 cursor-pointer"
+              />
+            </label>
+
+            <label className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-850 cursor-pointer">
+              <div>
+                <span className="text-xs text-stone-300 block">Ask Customer Name</span>
+                <span className="text-[10px] text-stone-500 block">Prompt client for name on first visit</span>
+              </div>
+              <input
+                type="checkbox"
+                checked={askCustomerName}
+                onChange={(e) => setAskCustomerName(e.target.checked)}
+                className="w-4 h-4 accent-amber-500 cursor-pointer"
+              />
+            </label>
+
+            <label className="flex items-center justify-between p-3 rounded-xl bg-stone-950 border border-stone-850 cursor-pointer">
+              <div>
+                <span className="text-xs text-stone-300 block">Ask Mobile Number</span>
+                <span className="text-[10px] text-stone-500 block">Prompt client for phone number on first visit</span>
+              </div>
+              <input
+                type="checkbox"
+                checked={askCustomerPhone}
+                onChange={(e) => setAskCustomerPhone(e.target.checked)}
                 className="w-4 h-4 accent-amber-500 cursor-pointer"
               />
             </label>

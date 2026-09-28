@@ -46,6 +46,28 @@
         "selectionOrder": { "type": "number" }
       },
       "required": ["photoId", "driveFileId", "fileName", "selectedAt"]
+    },
+    "clientGallerySession": {
+      "title": "Client Gallery Session",
+      "description": "Persistent client selection session allowing long photo proofing sessions without account creation.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "galleryId": { "type": "string" },
+        "galleryToken": { "type": "string" },
+        "sessionAccessToken": { "type": "string" },
+        "recoveryCode": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "selectedPhotoIds": { "type": "array", "items": { "type": "string" } },
+        "selectedCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "submitted", "editing"] },
+        "createdAt": { "type": "string" },
+        "lastActivityAt": { "type": "string" },
+        "submittedAt": { "type": "string" },
+        "deviceInfoOptional": { "type": "string" }
+      },
+      "required": ["sessionId", "galleryId", "galleryToken", "recoveryCode", "status"]
     }
   },
   "firestore": {
@@ -56,6 +78,10 @@
     "/customerGalleries/{galleryId}/selections/{selectionId}": {
       "schema": "customerSelection",
       "description": "Individual photo selections submitted for a gallery."
+    },
+    "/clientGallerySessions/{sessionId}": {
+      "schema": "clientGallerySession",
+      "description": "Stores anonymous persistent client sessions with auto-saved selections."
     }
   }
 }

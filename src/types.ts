@@ -272,6 +272,31 @@ export interface CustomerGallery {
   lastActivity?: string;
   driveAccount?: string;
   collectedFolderId?: string; // Created 'Customer Selected' Google Drive folder ID
+  askCustomerName?: boolean; // Optional: prompt for client name on first visit
+  askCustomerPhone?: boolean; // Optional: prompt for mobile number on first visit
 }
+
+export type ClientSessionStatus = 'active' | 'submitted' | 'editing';
+
+export type AutoSaveStatus = 'saved' | 'saving' | 'syncing' | 'offline';
+
+export interface ClientGallerySession {
+  sessionId: string;
+  galleryId: string;
+  galleryToken: string;
+  sessionAccessToken: string;
+  recoveryCode: string; // 6-digit recovery code e.g. '482761'
+  customerName?: string;
+  customerPhone?: string;
+  selectedPhotoIds: string[];
+  selectedCount: number;
+  status: ClientSessionStatus;
+  createdAt: string;
+  lastActivityAt: string;
+  submittedAt?: string;
+  deviceInfoOptional?: string;
+  notes?: string;
+}
+
 
 

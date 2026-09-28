@@ -41,6 +41,18 @@ service cloud.firestore {
       }
     }
 
+    // Client Gallery Sessions (Zero login anonymous client sessions)
+    match /clientGallerySessions/{sessionId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if isAuthenticated();
+
+      match /selections/{photoId} {
+        allow read, write: if true;
+      }
+    }
+
     // Default catch-all for existing collections
     match /{document=**} {
       allow read, write: if true;
