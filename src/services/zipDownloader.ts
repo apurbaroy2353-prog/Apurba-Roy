@@ -192,6 +192,140 @@ export function exportFilenamesForLightroom(photos: DrivePhoto[]): string {
   return photos.map((p) => p.name.replace(/\.[^/.]+$/, '')).join(', ');
 }
 
+function escapeCSV(str: string): string {
+  if (!str) return '""';
+  const escaped = String(str).replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+function triggerFileDownload(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+/**
+ * Export client selection as a structured JSON file formatted for Adobe Lightroom ingestion & workflow automation
+ */
+export function exportSelectionToJSON(
+  submission: ClientSelectionSubmission,
+  album?: Album | null
+): void {
+  const allPhotos: DrivePhoto[] = album?.cachedPhotos || [];
+  const selectedPhotos = submission.selectedPhotoIds.map((id, index) => {
+    const found = allPhotos.find((p) => p.id === id);
+    const filename = found ? found.name : `Photo_${id}.jpg`;
+    const baseName = filename.replace(/\.[^/.]+$/, '');
+    return {
+      sequenceNumber: index + 1,
+      photoId: id,
+      filename,
+      baseName,
+      mimeType: found?.mimeType || 'image/jpeg',
+      rating: 5,
+      colorLabel: 'Green',
+      flag: 'Pick',
+      webUrl: found?.webViewLink || '',
+    };
+  });
+
+  const exportData = {
+    exportFormat: 'Adobe_Lightroom_Ingestion_Manifest_v1',
+    exportedAt: new Date().toISOString(),
+    album: {
+      id: album?.id || submission.albumId,
+      title: album?.title || 'Wedding Album',
+      coupleNames: album?.coupleNames || '',
+      weddingDate: album?.weddingDate || '',
+      driveFolderId: album?.driveFolderId || '',
+      driveFolderName: album?.driveFolderName || '',
+    },
+    clientSubmission: {
+      id: submission.id,
+      clientName: submission.clientName,
+      clientEmail: submission.clientEmail || '',
+      submittedAt: submission.submittedAt,
+      status: submission.status || 'completed',
+      clientNotes: submission.clientNotes || '',
+      totalSelected: selectedPhotos.length,
+    },
+    lightroomFilterString: selectedPhotos.map((p) => p.baseName).join(', '),
+    photos: selectedPhotos,
+  };
+
+  const safeClient = (submission.clientName || 'Client').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeAlbum = (album?.title || 'Album').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const fileName = `${safeAlbum}_${safeClient}_Lightroom_Selection.json`;
+
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  });
+  triggerFileDownload(blob, fileName);
+}
+
+/**
+ * Export client selection as a CSV file compatible with Lightroom metadata ingestion, spreadsheet catalogs, and Capture One
+ */
+export function exportSelectionToCSV(
+  submission: ClientSelectionSubmission,
+  album?: Album | null
+): void {
+  const allPhotos: DrivePhoto[] = album?.cachedPhotos || [];
+  const headers = [
+    'Sequence',
+    'Filename',
+    'BaseName',
+    'PhotoID',
+    'Flag',
+    'Rating',
+    'ColorLabel',
+    'ClientName',
+    'ClientEmail',
+    'AlbumTitle',
+    'WeddingDate',
+    'SubmittedAt',
+    'Status',
+    'ClientNotes',
+  ];
+
+  const rows = submission.selectedPhotoIds.map((id, index) => {
+    const found = allPhotos.find((p) => p.id === id);
+    const filename = found ? found.name : `Photo_${id}.jpg`;
+    const baseName = filename.replace(/\.[^/.]+$/, '');
+    return [
+      String(index + 1),
+      escapeCSV(filename),
+      escapeCSV(baseName),
+      escapeCSV(id),
+      'Pick',
+      '5',
+      'Green',
+      escapeCSV(submission.clientName || ''),
+      escapeCSV(submission.clientEmail || ''),
+      escapeCSV(album?.title || ''),
+      escapeCSV(album?.weddingDate || ''),
+      escapeCSV(submission.submittedAt || ''),
+      escapeCSV(submission.status || 'completed'),
+      escapeCSV(submission.clientNotes || ''),
+    ].join(',');
+  });
+
+  const csvContent = [headers.join(','), ...rows].join('\r\n');
+  const safeClient = (submission.clientName || 'Client').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeAlbum = (album?.title || 'Album').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const fileName = `${safeAlbum}_${safeClient}_Lightroom_Selection.csv`;
+
+  const blob = new Blob([csvContent], {
+    type: 'text/csv;charset=utf-8;',
+  });
+  triggerFileDownload(blob, fileName);
+}
+
 /**
  * Triggers an immediate direct browser download for an individual photo
  */

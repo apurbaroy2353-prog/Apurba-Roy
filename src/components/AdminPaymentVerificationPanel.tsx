@@ -18,8 +18,9 @@ import {
   Eye,
   Sliders,
   DollarSign,
+  Zap,
 } from 'lucide-react';
-import { Album, PhotoPaymentRequest, PaymentStatus, DrivePhoto } from '../types';
+import { Album, PhotoPaymentRequest, PaymentStatus, DrivePhoto, PaymentGatewaySettings } from '../types';
 import {
   PAYMENT_ACCOUNTS,
   WHATSAPP_SUPPORT_NUMBER,
@@ -31,13 +32,16 @@ import {
   togglePhotoPaidStatus,
   togglePhotoDownloadPermission,
   toggleAlbumClientDownloadPermission,
+  getPaymentGatewaySettings,
 } from '../services/albumStorage';
+import { IntegratePaymentGatewayModal } from './IntegratePaymentGatewayModal';
 
 interface AdminPaymentVerificationPanelProps {
   albums: Album[];
   paymentRequests: PhotoPaymentRequest[];
   onRefreshData: () => void;
   onSelectAlbum?: (album: Album) => void;
+  onOpenGatewayModal?: () => void;
 }
 
 export const AdminPaymentVerificationPanel: React.FC<AdminPaymentVerificationPanelProps> = ({
@@ -45,7 +49,10 @@ export const AdminPaymentVerificationPanel: React.FC<AdminPaymentVerificationPan
   paymentRequests,
   onRefreshData,
   onSelectAlbum,
+  onOpenGatewayModal,
 }) => {
+  const [internalGatewayModalOpen, setInternalGatewayModalOpen] = useState(false);
+  const gatewaySettings = getPaymentGatewaySettings();
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
   const [selectedAlbumId, setSelectedAlbumId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -128,22 +135,39 @@ export const AdminPaymentVerificationPanel: React.FC<AdminPaymentVerificationPan
           </p>
         </div>
 
-        {/* WhatsApp Support info */}
-        <div className="flex items-center gap-2.5 p-3 rounded-2xl bg-stone-950 border border-stone-800 shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
-            <MessageCircle className="w-4 h-4" />
-          </div>
-          <div className="text-xs">
-            <p className="text-stone-400 text-[11px]">WhatsApp Support Helpline:</p>
-            <a
-              href={WHATSAPP_LINK}
-              target="_blank"
-              rel="noreferrer"
-              className="font-mono font-bold text-emerald-400 hover:underline flex items-center gap-1"
-            >
-              <span>{WHATSAPP_SUPPORT_NUMBER}</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
+        {/* Actions & WhatsApp Support */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            onClick={() => {
+              if (onOpenGatewayModal) {
+                onOpenGatewayModal();
+              } else {
+                setInternalGatewayModalOpen(true);
+              }
+            }}
+            className="px-3.5 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-semibold transition flex items-center gap-2 shadow-md shadow-amber-950/20"
+          >
+            <CreditCard className="w-4 h-4" />
+            <span>Integrate Payment Gateway</span>
+          </button>
+
+          {/* WhatsApp Support info */}
+          <div className="flex items-center gap-2.5 p-2 rounded-2xl bg-stone-950 border border-stone-800 shrink-0">
+            <div className="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+              <MessageCircle className="w-3.5 h-3.5" />
+            </div>
+            <div className="text-xs">
+              <p className="text-stone-400 text-[10px]">WhatsApp Helpline:</p>
+              <a
+                href={WHATSAPP_LINK}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono font-bold text-emerald-400 hover:underline flex items-center gap-1"
+              >
+                <span>{WHATSAPP_SUPPORT_NUMBER}</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
           </div>
         </div>
       </div>
@@ -184,10 +208,60 @@ export const AdminPaymentVerificationPanel: React.FC<AdminPaymentVerificationPan
             <p className="text-2xl font-serif font-bold text-stone-100">৳{totalRevenue}</p>
             <p className="text-xs text-stone-400">মোট সংগৃহীত পেমেন্ট (BDT)</p>
             <p className="text-[10px] text-emerald-400 mt-0.5 font-mono">
-              bKash / Nagad / Rocket
+              bKash / Nagad / Cards / Stripe
             </p>
           </div>
         </div>
+      </div>
+
+      {/* Payment Gateway Integration Status Banner */}
+      <div className="p-4 rounded-2xl bg-stone-900/60 border border-stone-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center border border-amber-500/20 shrink-0">
+            <Zap className="w-4 h-4 text-amber-400" />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-stone-200">Online Gateways:</span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-semibold border ${
+                  gatewaySettings.stripe.enabled
+                    ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
+                    : 'bg-stone-800 text-stone-500 border-stone-750'
+                }`}
+              >
+                Stripe: {gatewaySettings.stripe.enabled ? gatewaySettings.stripe.mode.toUpperCase() : 'Disabled'}
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-semibold border ${
+                  gatewaySettings.sslcommerz.enabled
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                    : 'bg-stone-800 text-stone-500 border-stone-750'
+                }`}
+              >
+                SSLCommerz: {gatewaySettings.sslcommerz.enabled ? gatewaySettings.sslcommerz.mode.toUpperCase() : 'Disabled'}
+              </span>
+            </div>
+            <p className="text-[11px] text-stone-400 mt-0.5">
+              Routing: {gatewaySettings.activeGateway === 'all' ? 'Stripe & SSLCommerz' : gatewaySettings.activeGateway.toUpperCase()}
+              {gatewaySettings.allowManualFallback && ' • Manual bKash/Nagad TrxID fallback active'}
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={() => {
+            if (onOpenGatewayModal) {
+              onOpenGatewayModal();
+            } else {
+              setInternalGatewayModalOpen(true);
+            }
+          }}
+          className="px-3 py-1.5 rounded-xl bg-stone-950 hover:bg-stone-850 border border-stone-800 text-amber-300 text-xs font-medium transition flex items-center gap-1.5 self-start sm:self-auto shadow-xs"
+        >
+          <CreditCard className="w-3.5 h-3.5 text-amber-400" />
+          <span>Configure Gateways</span>
+        </button>
       </div>
 
       {/* Filter and Search Bar */}
@@ -602,6 +676,13 @@ export const AdminPaymentVerificationPanel: React.FC<AdminPaymentVerificationPan
           })}
         </div>
       </div>
+
+      {/* Integrate Payment Gateway Modal fallback */}
+      <IntegratePaymentGatewayModal
+        isOpen={internalGatewayModalOpen}
+        onClose={() => setInternalGatewayModalOpen(false)}
+        onSettingsSaved={() => onRefreshData()}
+      />
     </div>
   );
 };

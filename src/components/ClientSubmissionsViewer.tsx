@@ -18,9 +18,16 @@ import {
   ArrowUpDown,
   Archive,
   Loader2,
+  FileJson,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { Album, ClientSelectionSubmission, DrivePhoto, SubmissionStatus } from '../types';
-import { downloadSubmissionAsZip, exportFilenamesForLightroom } from '../services/zipDownloader';
+import {
+  downloadSubmissionAsZip,
+  exportFilenamesForLightroom,
+  exportSelectionToJSON,
+  exportSelectionToCSV,
+} from '../services/zipDownloader';
 import { updateSubmissionStatus } from '../services/albumStorage';
 
 interface ClientSubmissionsViewerProps {
@@ -51,6 +58,7 @@ export const ClientSubmissionsViewer: React.FC<ClientSubmissionsViewerProps> = (
     filename: string;
   } | null>(null);
   const [copiedFilenames, setCopiedFilenames] = useState(false);
+  const [exportedFormat, setExportedFormat] = useState<'json' | 'csv' | null>(null);
 
   // If selectedSubId is not in submissions or is empty, fallback to the first
   const activeSubmission =
@@ -138,6 +146,20 @@ export const ClientSubmissionsViewer: React.FC<ClientSubmissionsViewerProps> = (
     navigator.clipboard.writeText(text);
     setCopiedFilenames(true);
     setTimeout(() => setCopiedFilenames(false), 2500);
+  };
+
+  const handleExportJSON = () => {
+    if (!activeSubmission) return;
+    exportSelectionToJSON(activeSubmission, album);
+    setExportedFormat('json');
+    setTimeout(() => setExportedFormat(null), 2500);
+  };
+
+  const handleExportCSV = () => {
+    if (!activeSubmission) return;
+    exportSelectionToCSV(activeSubmission, album);
+    setExportedFormat('csv');
+    setTimeout(() => setExportedFormat(null), 2500);
   };
 
   if (submissions.length === 0) {
@@ -390,6 +412,45 @@ export const ClientSubmissionsViewer: React.FC<ClientSubmissionsViewerProps> = (
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {/* Lightroom Ingestion Export Buttons */}
+                <div className="flex items-center gap-1 bg-stone-900 p-1 rounded-xl border border-stone-800">
+                  <button
+                    onClick={handleExportJSON}
+                    className="px-3 py-1.5 rounded-lg bg-stone-850 hover:bg-stone-800 hover:text-amber-300 text-stone-200 text-xs font-medium border border-stone-750 transition flex items-center gap-1.5 shadow-xs"
+                    title="Export selection to JSON manifest for Adobe Lightroom ingestion"
+                  >
+                    {exportedFormat === 'json' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400 font-medium">Exported JSON!</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileJson className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Export JSON</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleExportCSV}
+                    className="px-3 py-1.5 rounded-lg bg-stone-850 hover:bg-stone-800 hover:text-emerald-300 text-stone-200 text-xs font-medium border border-stone-750 transition flex items-center gap-1.5 shadow-xs"
+                    title="Export selection to CSV spreadsheet for Lightroom ingestion"
+                  >
+                    {exportedFormat === 'csv' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400 font-medium">Exported CSV!</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Export CSV</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
                 {/* Copy file list for Lightroom / Capture One */}
                 <button
                   onClick={handleCopyLightroomNames}
@@ -404,7 +465,7 @@ export const ClientSubmissionsViewer: React.FC<ClientSubmissionsViewerProps> = (
                   ) : (
                     <>
                       <Copy className="w-3.5 h-3.5 text-stone-400" />
-                      <span>Copy Lightroom Filenames</span>
+                      <span>Copy Names</span>
                     </>
                   )}
                 </button>

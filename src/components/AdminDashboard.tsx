@@ -34,6 +34,8 @@ import {
   Sliders,
   DollarSign,
   ShieldCheck,
+  FileJson,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import { Album, ClientSelectionSubmission, SubmissionStatus } from '../types';
@@ -42,6 +44,7 @@ import { ClientSubmissionsViewer } from './ClientSubmissionsViewer';
 import { AnalyticsPanel } from './AnalyticsPanel';
 import { AdminPaymentVerificationPanel } from './AdminPaymentVerificationPanel';
 import { SendEmailNotificationModal, EmailTemplateType } from './SendEmailNotificationModal';
+import { IntegratePaymentGatewayModal } from './IntegratePaymentGatewayModal';
 import { listPhotosInFolder } from '../services/drive';
 import {
   saveAlbum,
@@ -49,7 +52,11 @@ import {
   getStoredPaymentRequests,
   toggleAlbumClientDownloadPermission,
 } from '../services/albumStorage';
-import { downloadSubmissionAsZip } from '../services/zipDownloader';
+import {
+  downloadSubmissionAsZip,
+  exportSelectionToJSON,
+  exportSelectionToCSV,
+} from '../services/zipDownloader';
 
 interface AdminDashboardProps {
   user: User | null;
@@ -87,6 +94,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [submissionSearch, setSubmissionSearch] = useState('');
   const [submissionStatusFilter, setSubmissionStatusFilter] = useState<'all' | 'completed' | 'in_progress'>('all');
   const [downloadingSubId, setDownloadingSubId] = useState<string | null>(null);
+  const [isGatewayModalOpen, setIsGatewayModalOpen] = useState(false);
 
   // Payment Requests data
   const paymentRequests = getStoredPaymentRequests();
@@ -99,6 +107,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     total: number;
     filename: string;
   } | null>(null);
+
+  // Export to JSON / CSV feedback
+  const [exportedFeedback, setExportedFeedback] = useState<{
+    subId: string;
+    format: 'json' | 'csv';
+  } | null>(null);
+
+  const handleExportJSON = (sub: ClientSelectionSubmission, album?: Album | null) => {
+    exportSelectionToJSON(sub, album);
+    setExportedFeedback({ subId: sub.id, format: 'json' });
+    setTimeout(() => setExportedFeedback(null), 2500);
+  };
+
+  const handleExportCSV = (sub: ClientSelectionSubmission, album?: Album | null) => {
+    exportSelectionToCSV(sub, album);
+    setExportedFeedback({ subId: sub.id, format: 'csv' });
+    setTimeout(() => setExportedFeedback(null), 2500);
+  };
 
   // Email Notification Modal State
   const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
@@ -294,6 +320,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span>Connect Google Drive</span>
               </button>
             )}
+
+            {/* Integrate Payment Gateway Button */}
+            <button
+              onClick={() => setIsGatewayModalOpen(true)}
+              className="px-3.5 py-2 bg-stone-900 hover:bg-stone-850 border border-amber-500/40 hover:border-amber-400 text-amber-300 text-xs font-semibold rounded-xl transition shadow-md flex items-center gap-2"
+              title="Configure Stripe or SSLCommerz payment gateways"
+            >
+              <CreditCard className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Integrate Payment Gateway</span>
+              <span className="sm:hidden">Gateway</span>
+            </button>
 
             <button
               onClick={() => setIsCreateModalOpen(true)}
@@ -492,6 +529,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             albums={albums}
             paymentRequests={paymentRequests}
             onRefreshData={onRefreshData}
+            onOpenGatewayModal={() => setIsGatewayModalOpen(true)}
             onSelectAlbum={(alb) => {
               setSelectedAlbumForDetails(alb);
               setActiveTab('albums');
@@ -741,7 +779,51 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </span>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {/* Lightroom Ingestion Export Buttons */}
+                          <div className="flex items-center gap-1 bg-stone-950 p-1 rounded-xl border border-stone-800">
+                            <span className="text-[10px] text-amber-400 font-mono font-semibold px-2 py-0.5 uppercase tracking-wider hidden sm:inline-flex items-center gap-1">
+                              <Sparkles className="w-3 h-3 text-amber-400" />
+                              Lightroom:
+                            </span>
+
+                            <button
+                              onClick={() => handleExportJSON(sub, album)}
+                              className="px-2.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-850 hover:text-amber-300 text-stone-200 text-xs font-medium border border-stone-800 transition flex items-center gap-1.5 shadow-xs"
+                              title="Export client selection as JSON manifest for Adobe Lightroom ingestion"
+                            >
+                              {exportedFeedback?.subId === sub.id && exportedFeedback.format === 'json' ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span className="text-emerald-400 font-medium">Exported JSON!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <FileJson className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>JSON</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              onClick={() => handleExportCSV(sub, album)}
+                              className="px-2.5 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-850 hover:text-emerald-300 text-stone-200 text-xs font-medium border border-stone-800 transition flex items-center gap-1.5 shadow-xs"
+                              title="Export client selection as CSV catalog spreadsheet for Lightroom ingestion"
+                            >
+                              {exportedFeedback?.subId === sub.id && exportedFeedback.format === 'csv' ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span className="text-emerald-400 font-medium">Exported CSV!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>CSV</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+
                           {album && (
                             <button
                               onClick={() => onViewAsClient(album)}
@@ -1237,6 +1319,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         senderName={user?.displayName || 'রম্যছবি - RamyaChobi Photography'}
         onClose={() => setIsEmailModalOpen(false)}
         onNotificationSent={handleNotificationSent}
+      />
+
+      {/* Integrate Payment Gateway Modal (Stripe & SSLCommerz) */}
+      <IntegratePaymentGatewayModal
+        isOpen={isGatewayModalOpen}
+        onClose={() => setIsGatewayModalOpen(false)}
+        onSettingsSaved={() => {
+          onRefreshData();
+        }}
       />
     </div>
   );

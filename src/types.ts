@@ -44,8 +44,38 @@ export interface ClientSelectionSubmission {
   clientIpOrDevice?: string;
 }
 
-export type PaymentMethod = 'bKash' | 'Nagad' | 'Rocket';
+export type PaymentMethod = 'bKash' | 'Nagad' | 'Rocket' | 'Stripe' | 'SSLCommerz';
 export type PaymentStatus = 'pending' | 'approved' | 'rejected';
+
+export type PaymentGatewayProvider = 'stripe' | 'sslcommerz';
+
+export interface StripeGatewayConfig {
+  enabled: boolean;
+  mode: 'test' | 'live';
+  publishableKey: string;
+  secretKey: string;
+  webhookSecret?: string;
+  currency: 'usd' | 'bdt' | 'eur' | 'gbp';
+  statementDescriptor?: string;
+}
+
+export interface SSLCommerzGatewayConfig {
+  enabled: boolean;
+  mode: 'sandbox' | 'live';
+  storeId: string;
+  storePassword: string;
+  ipnUrl?: string;
+  currency: 'BDT';
+}
+
+export interface PaymentGatewaySettings {
+  activeGateway: 'manual' | 'stripe' | 'sslcommerz' | 'all';
+  allowManualFallback: boolean;
+  stripe: StripeGatewayConfig;
+  sslcommerz: SSLCommerzGatewayConfig;
+  updatedAt?: string;
+  lastTestedAt?: string;
+}
 
 export interface PhotoPaymentRequest {
   id: string;
@@ -94,3 +124,50 @@ export interface FaceMatchScore {
   photo: DrivePhoto;
   similarity: number; // 0 to 100 percentage
 }
+
+export interface ClientProfileData {
+  albumId: string;
+  partner1Name?: string;
+  partner2Name?: string;
+  coupleNames?: string;
+  email?: string;
+  phone?: string;
+  weddingDate?: string;
+  venue?: string;
+  city?: string;
+  deliveryAddress?: string;
+  packageType?: string;
+  clientNotes?: string;
+  updatedAt?: string;
+}
+
+export type ClientActivityType =
+  | 'view_gallery'
+  | 'select_photo'
+  | 'unselect_photo'
+  | 'submit_selection'
+  | 'make_payment'
+  | 'download_photo'
+  | 'face_search';
+
+export interface ClientActivityLogEntry {
+  id: string;
+  albumId: string;
+  activityType: ClientActivityType;
+  title: string;
+  description: string;
+  timestamp: string;
+  clientName?: string;
+  metadata?: {
+    photoId?: string;
+    photoName?: string;
+    selectionCount?: number;
+    amount?: number;
+    paymentMethod?: string;
+    transactionId?: string;
+    device?: string;
+    status?: string;
+    notes?: string;
+  };
+}
+

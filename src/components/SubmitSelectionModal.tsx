@@ -22,6 +22,7 @@ interface SubmitSelectionModalProps {
   onClose: () => void;
   onSuccess: () => void;
   onBackToSummary?: () => void;
+  onViewProfile?: () => void;
 }
 
 export const SubmitSelectionModal: React.FC<SubmitSelectionModalProps> = ({
@@ -31,6 +32,7 @@ export const SubmitSelectionModal: React.FC<SubmitSelectionModalProps> = ({
   onClose,
   onSuccess,
   onBackToSummary,
+  onViewProfile,
 }) => {
   const [clientName, setClientName] = useState('');
   const [clientEmail, setClientEmail] = useState('');
@@ -110,15 +112,31 @@ export const SubmitSelectionModal: React.FC<SubmitSelectionModalProps> = ({
               <p>2. We'll start designing your album layout or fine-tuning high-resolution edits.</p>
             </div>
 
-            <button
-              onClick={() => {
-                onSuccess();
-                onClose();
-              }}
-              className="w-full py-3 bg-linear-to-r from-amber-500 to-rose-500 text-stone-950 font-semibold text-sm rounded-xl transition shadow-lg hover:opacity-95"
-            >
-              Back to Gallery
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2.5">
+              {onViewProfile && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSuccess();
+                    onClose();
+                    onViewProfile();
+                  }}
+                  className="flex-1 py-3 bg-stone-850 hover:bg-stone-800 border border-stone-750 text-amber-300 font-semibold text-xs sm:text-sm rounded-xl transition shadow-xs"
+                >
+                  View in My Profile & History →
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  onSuccess();
+                  onClose();
+                }}
+                className="flex-1 py-3 bg-linear-to-r from-amber-500 to-rose-500 text-stone-950 font-bold text-xs sm:text-sm rounded-xl transition shadow-lg hover:opacity-95"
+              >
+                Back to Gallery
+              </button>
+            </div>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-5">

@@ -26,6 +26,7 @@ import {
   Loader2,
   CreditCard,
   MessageCircle,
+  User,
 } from 'lucide-react';
 import { Album, DrivePhoto, PhotoPaymentRequest } from '../types';
 import { listPhotosInFolder } from '../services/drive';
@@ -35,6 +36,7 @@ import {
   saveLocalSelectionDraft,
   getSubmissionsForAlbum,
   isPhotoApprovedForClient,
+  logClientActivity,
   WHATSAPP_SUPPORT_NUMBER,
   WHATSAPP_LINK,
 } from '../services/albumStorage';
@@ -43,6 +45,7 @@ import { SubmitSelectionModal } from './SubmitSelectionModal';
 import { SelectionSummaryModal } from './SelectionSummaryModal';
 import { PhotoPaymentModal } from './PhotoPaymentModal';
 import { FaceSearchModal } from './FaceSearchModal';
+import { ClientProfileView } from './ClientProfileView';
 
 interface ClientGalleryViewProps {
   album: Album;
@@ -66,6 +69,9 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
     const draft = getLocalSelectionDraft(album.id);
     return new Set(draft);
   });
+
+  // Main view mode: 'gallery' | 'profile'
+  const [currentView, setCurrentView] = useState<'gallery' | 'profile'>('gallery');
 
   // Filter tab: 'all' | 'selected' | 'unselected'
   const [filterMode, setFilterMode] = useState<'all' | 'selected' | 'unselected'>('all');
@@ -120,6 +126,18 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
         setTimeout(() => {
           setJustDownloadedId((prev) => (prev === photo.id ? null : prev));
         }, 2500);
+
+        logClientActivity(
+          album.id,
+          'download_photo',
+          `Downloaded Photo (${photo.name})`,
+          `Client downloaded high-resolution photo file ${photo.name}.`,
+          {
+            photoId: photo.id,
+            photoName: photo.name,
+          },
+          album.coupleNames
+        );
       } else {
         alert(`Could not download ${photo.name}. Please try again.`);
       }
@@ -195,8 +213,30 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
     loadDrivePhotos();
   }, [album.driveFolderId, accessToken]);
 
+  // Log client visiting the gallery once per session
+  useEffect(() => {
+    const sessionKey = `rc_logged_view_${album.id}_${new Date().toDateString()}`;
+    if (!sessionStorage.getItem(sessionKey)) {
+      sessionStorage.setItem(sessionKey, '1');
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      logClientActivity(
+        album.id,
+        'view_gallery',
+        'Gallery Opened & Viewed',
+        `Client viewed ${album.title} with ${photos.length} photos on ${isMobile ? 'Mobile Device' : 'Desktop Browser'}.`,
+        {
+          device: isMobile ? 'Mobile Device' : 'Desktop Browser',
+          selectionCount: selectedIds.size,
+        },
+        album.coupleNames
+      );
+    }
+  }, [album.id, photos.length]);
+
   const toggleSelectPhoto = (photoId: string): boolean => {
-    if (!selectedIds.has(photoId)) {
+    const isAdding = !selectedIds.has(photoId);
+
+    if (isAdding) {
       // Trying to select a new photo when limit is reached
       if (hasLimit && selectedIds.size >= selectionLimit) {
         setLimitWarning(
@@ -210,6 +250,8 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
       }
     }
 
+    const photoObj = photos.find((p) => p.id === photoId);
+
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(photoId)) {
@@ -220,6 +262,35 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
       saveLocalSelectionDraft(album.id, Array.from(next));
       return next;
     });
+
+    if (isAdding) {
+      logClientActivity(
+        album.id,
+        'select_photo',
+        `Favorited Photo ${photoObj ? photoObj.name : photoId}`,
+        `Client added photo to their selection list (Total: ${selectedIds.size + 1})`,
+        {
+          photoId,
+          photoName: photoObj?.name,
+          selectionCount: selectedIds.size + 1,
+        },
+        album.coupleNames
+      );
+    } else {
+      logClientActivity(
+        album.id,
+        'unselect_photo',
+        `Removed Favorite ${photoObj ? photoObj.name : photoId}`,
+        `Client removed photo from selection list (Remaining: ${Math.max(0, selectedIds.size - 1)})`,
+        {
+          photoId,
+          photoName: photoObj?.name,
+          selectionCount: Math.max(0, selectedIds.size - 1),
+        },
+        album.coupleNames
+      );
+    }
+
     return true;
   };
 
@@ -340,6 +411,88 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
     setTimeout(() => setCopiedLink(false), 2500);
   };
 
+  if (currentView === 'profile') {
+    return (
+      <div className="min-h-screen bg-stone-950 text-stone-100 flex flex-col selection:bg-rose-500 selection:text-white">
+        {/* Top Notice Banner if Admin viewing */}
+        {isAdminViewing && (
+          <div className="bg-amber-950/80 border-b border-amber-800/40 px-4 py-2 text-xs flex items-center justify-between text-amber-200">
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <strong>Client Preview Mode</strong> — Viewing Client Profile & History.
+            </span>
+            {onBackToAdmin && (
+              <button
+                onClick={onBackToAdmin}
+                className="underline text-amber-300 hover:text-white font-medium ml-4 shrink-0"
+              >
+                ← Back to Admin Dashboard
+              </button>
+            )}
+          </div>
+        )}
+
+        <ClientProfileView
+          album={album}
+          photos={photos}
+          selectedIds={selectedIds}
+          onBackToGallery={() => setCurrentView('gallery')}
+          onViewSelectedInGallery={() => {
+            setFilterMode('selected');
+            setCurrentView('gallery');
+          }}
+          onOpenFaceSearch={() => setIsFaceSearchModalOpen(true)}
+          onOpenPaymentModal={() => {
+            if (photos.length > 0) {
+              setPhotosToPay([photos[0]]);
+              setIsPaymentModalOpen(true);
+            }
+          }}
+        />
+
+        {/* Submit Selection Modal */}
+        <SubmitSelectionModal
+          album={album}
+          selectedPhotoIds={Array.from(selectedIds)}
+          isOpen={isSubmitModalOpen}
+          onClose={() => setIsSubmitModalOpen(false)}
+          onBackToSummary={() => setIsSummaryModalOpen(true)}
+          onSuccess={() => {
+            setSubmissionsCount((prev) => prev + 1);
+          }}
+        />
+
+        {/* Paid Photo Payment Modal */}
+        <PhotoPaymentModal
+          isOpen={isPaymentModalOpen}
+          onClose={() => setIsPaymentModalOpen(false)}
+          album={album}
+          photosToBuy={photosToPay}
+          onPaymentSubmitted={(req) => {
+            console.log('Payment request submitted:', req);
+          }}
+        />
+
+        {/* AI Face Search Modal */}
+        <FaceSearchModal
+          isOpen={isFaceSearchModalOpen}
+          onClose={() => setIsFaceSearchModalOpen(false)}
+          album={album}
+          onFilterMatchingPhotos={(matchingIds) => {
+            setMatchingFacePhotoIds(matchingIds);
+          }}
+          onDownloadPhoto={handlePhotoDownloadClick}
+          onPayForPhoto={(photo) => {
+            setPhotosToPay([photo]);
+            setIsPaymentModalOpen(true);
+          }}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelectPhoto}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-stone-950 text-stone-100 flex flex-col selection:bg-rose-500 selection:text-white">
       {/* Top Notice Banner if Admin viewing */}
@@ -404,8 +557,18 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
               </div>
             </div>
 
-            {/* Actions for Header: Share link, etc */}
-            <div className="flex items-center gap-2 shrink-0">
+            {/* Actions for Header: Profile, Share link, AI Face Search */}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {/* Client Profile Button */}
+              <button
+                onClick={() => setCurrentView('profile')}
+                className="px-4 py-2.5 rounded-xl bg-stone-900/90 border border-amber-500/40 text-amber-300 hover:text-white hover:bg-stone-850 hover:border-amber-400 text-xs font-semibold transition flex items-center gap-2 shadow-sm"
+                title="View your client profile, personal details, and wedding interaction history"
+              >
+                <User className="w-4 h-4 text-amber-400" />
+                <span>Client Profile & History</span>
+              </button>
+
               {/* AI Face Search Primary Action */}
               <button
                 onClick={() => setIsFaceSearchModalOpen(true)}
@@ -502,6 +665,16 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
               <span>{matchingFacePhotoIds !== null ? `Face Match (${matchingFacePhotoIds.length})` : 'AI Face Search'}</span>
+            </button>
+
+            {/* Client Profile & History Tab */}
+            <button
+              onClick={() => setCurrentView('profile')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-stone-800 bg-stone-900/80 hover:bg-stone-850 hover:border-amber-500/40 text-stone-300 hover:text-amber-300 text-xs font-semibold transition"
+              title="View your client profile, personal details, and wedding interaction history"
+            >
+              <User className="w-3.5 h-3.5 text-amber-400" />
+              <span>Profile & History</span>
             </button>
           </div>
 
@@ -1078,6 +1251,7 @@ export const ClientGalleryView: React.FC<ClientGalleryViewProps> = ({
         isOpen={isSubmitModalOpen}
         onClose={() => setIsSubmitModalOpen(false)}
         onBackToSummary={() => setIsSummaryModalOpen(true)}
+        onViewProfile={() => setCurrentView('profile')}
         onSuccess={() => {
           setSubmissionsCount((prev) => prev + 1);
         }}

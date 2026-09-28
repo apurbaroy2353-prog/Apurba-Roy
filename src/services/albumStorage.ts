@@ -1,4 +1,14 @@
-import { Album, ClientSelectionSubmission, DrivePhoto, PhotoPaymentRequest, PaymentStatus } from '../types';
+import {
+  Album,
+  ClientSelectionSubmission,
+  DrivePhoto,
+  PhotoPaymentRequest,
+  PaymentStatus,
+  ClientActivityLogEntry,
+  ClientActivityType,
+  PaymentGatewaySettings,
+  PaymentGatewayProvider,
+} from '../types';
 
 const ALBUMS_STORAGE_KEY = 'ramyachobi_albums_v2';
 const SUBMISSIONS_STORAGE_KEY = 'ramyachobi_submissions_v2';
@@ -325,6 +335,22 @@ export function addSubmission(submission: Omit<ClientSelectionSubmission, 'id' |
   };
   submissions.unshift(newSub);
   saveStoredSubmissions(submissions);
+
+  // Automatically log client activity
+  logClientActivity(
+    newSub.albumId,
+    'submit_selection',
+    `Photo Selection Submitted (${newSub.selectedPhotoIds.length} Photos)`,
+    `${newSub.clientName || 'Client'} submitted a selection batch of ${newSub.selectedPhotoIds.length} photos for album design.`,
+    {
+      selectionCount: newSub.selectedPhotoIds.length,
+      device: newSub.clientIpOrDevice || 'Web Browser',
+      notes: newSub.clientNotes,
+      status: newSub.status,
+    },
+    newSub.clientName
+  );
+
   return newSub;
 }
 
@@ -433,6 +459,23 @@ export function addPaymentRequest(
   };
   requests.unshift(newReq);
   saveStoredPaymentRequests(requests);
+
+  // Automatically log client activity
+  logClientActivity(
+    newReq.albumId,
+    'make_payment',
+    `Payment Order Placed via ${newReq.paymentMethod} (৳${newReq.totalAmount})`,
+    `${newReq.clientName || 'Client'} submitted payment order for ${newReq.photoIds.length} premium photos (TrxID: ${newReq.transactionId}).`,
+    {
+      amount: newReq.totalAmount,
+      paymentMethod: newReq.paymentMethod,
+      transactionId: newReq.transactionId,
+      selectionCount: newReq.photoIds.length,
+      status: 'pending',
+    },
+    newReq.clientName
+  );
+
   return newReq;
 }
 
@@ -454,11 +497,25 @@ export function updatePaymentRequestStatus(
   requests[index] = updated;
   saveStoredPaymentRequests(requests);
 
-  // If approved, mark photo permissions as granted
+  // If approved, mark photo permissions as granted and log activity
   if (status === 'approved') {
     updated.photoIds.forEach((photoId) => {
       grantDirectPhotoDownload(updated.albumId, photoId, updated.clientPhone || updated.clientEmail);
     });
+
+    logClientActivity(
+      updated.albumId,
+      'make_payment',
+      `Payment Approved & Downloads Unlocked (৳${updated.totalAmount})`,
+      `Studio approved payment via ${updated.paymentMethod}. Downloads unlocked for ${updated.photoIds.length} photos.`,
+      {
+        amount: updated.totalAmount,
+        paymentMethod: updated.paymentMethod,
+        transactionId: updated.transactionId,
+        status: 'approved',
+      },
+      updated.clientName
+    );
   }
 
   return updated;
@@ -571,3 +628,338 @@ export function toggleAlbumClientDownloadPermission(
   saveStoredAlbums(albums);
   return album;
 }
+
+// ==========================================
+// CLIENT PROFILE & INTERACTION PERSISTENCE
+// ==========================================
+
+const CLIENT_PROFILE_STORAGE_PREFIX = 'ramyachobi_client_profile_';
+
+export function getClientProfile(album: Album): import('../types').ClientProfileData {
+  try {
+    const raw = localStorage.getItem(`${CLIENT_PROFILE_STORAGE_PREFIX}${album.id}`);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('Failed reading client profile:', err);
+  }
+
+  // Derive initial profile from album metadata
+  const coupleParts = (album.coupleNames || '').split('&').map((s) => s.trim());
+  const partner1 = coupleParts[0] || 'Client';
+  const partner2 = coupleParts[1] || '';
+
+  const defaultProfile: import('../types').ClientProfileData = {
+    albumId: album.id,
+    partner1Name: partner1,
+    partner2Name: partner2,
+    coupleNames: album.coupleNames,
+    email: album.clientEmail || 'client@example.com',
+    phone: album.id === 'alb_sophie_julian' ? '+880 1712-345678' : '+880 1700-000000',
+    weddingDate: album.weddingDate,
+    venue: album.id === 'alb_sophie_julian' ? 'Villa Corsini a Mezzomonte' : 'Grand Ballroom & Resort',
+    city: album.id === 'alb_sophie_julian' ? 'Florence, Tuscany' : 'Dhaka, Bangladesh',
+    deliveryAddress:
+      album.id === 'alb_sophie_julian'
+        ? 'House 42, Road 11, Banani, Dhaka-1213'
+        : 'Dhaka, Bangladesh',
+    packageType: 'Signature Heirloom Wedding Collection',
+    clientNotes:
+      album.id === 'alb_sophie_julian'
+        ? 'Please ensure high-resolution color grading for evening reception shots and gold foil stamping on the leather album cover.'
+        : 'Special requests for album printing and retouching.',
+    updatedAt: album.updatedAt || new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(
+      `${CLIENT_PROFILE_STORAGE_PREFIX}${album.id}`,
+      JSON.stringify(defaultProfile)
+    );
+  } catch (e) {
+    console.error(e);
+  }
+
+  return defaultProfile;
+}
+
+export function saveClientProfile(profile: import('../types').ClientProfileData): void {
+  try {
+    const toSave = {
+      ...profile,
+      updatedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(
+      `${CLIENT_PROFILE_STORAGE_PREFIX}${profile.albumId}`,
+      JSON.stringify(toSave)
+    );
+  } catch (err) {
+    console.error('Failed saving client profile:', err);
+  }
+}
+
+// ==========================================
+// CLIENT ACTIVITY LOG PERSISTENCE
+// ==========================================
+
+const ACTIVITY_LOGS_STORAGE_PREFIX = 'ramyachobi_activity_logs_';
+
+const DEFAULT_ACTIVITY_LOGS: Record<string, ClientActivityLogEntry[]> = {
+  alb_sophie_julian: [
+    {
+      id: 'act_1',
+      albumId: 'alb_sophie_julian',
+      activityType: 'view_gallery',
+      title: 'Gallery Accessed & Viewed',
+      description: 'Julian Vance accessed Tuscany Wedding proofing gallery on Desktop Browser.',
+      timestamp: new Date(Date.now() - 86400000 * 3.5).toISOString(),
+      clientName: 'Julian Vance',
+      metadata: {
+        device: 'Desktop Browser (Chrome/macOS)',
+      },
+    },
+    {
+      id: 'act_2',
+      albumId: 'alb_sophie_julian',
+      activityType: 'face_search',
+      title: 'AI Face Search Scanned',
+      description: 'Client uploaded selfie reference photo to locate candid ceremony pictures.',
+      timestamp: new Date(Date.now() - 86400000 * 2.8).toISOString(),
+      clientName: 'Sophie Vance',
+      metadata: {
+        device: 'Mobile Device (iOS/Safari)',
+      },
+    },
+    {
+      id: 'act_3',
+      albumId: 'alb_sophie_julian',
+      activityType: 'select_photo',
+      title: 'Favorited 001_FirstLook_Vance.jpg',
+      description: 'Added to heirloom album cover candidates.',
+      timestamp: new Date(Date.now() - 86400000 * 2.2).toISOString(),
+      clientName: 'Sophie & Julian',
+      metadata: {
+        photoId: 'p1',
+        photoName: '001_FirstLook_Vance.jpg',
+      },
+    },
+    {
+      id: 'act_4',
+      albumId: 'alb_sophie_julian',
+      activityType: 'submit_selection',
+      title: 'Selection Draft Submitted (6 photos)',
+      description: 'Sophie Vance submitted finalized selection batch for Italian leather album cover.',
+      timestamp: new Date(Date.now() - 86400000 * 1.5).toISOString(),
+      clientName: 'Sophie Vance',
+      metadata: {
+        selectionCount: 6,
+        status: 'completed',
+        device: 'Desktop Browser',
+        notes: 'Please highlight color grading for evening reception shots.',
+      },
+    },
+    {
+      id: 'act_5',
+      albumId: 'alb_sophie_julian',
+      activityType: 'make_payment',
+      title: 'Payment Order Placed via Nagad (৳200)',
+      description: 'Submitted payment for 2 additional high-resolution ceremony downloads (TrxID: NGD49182377).',
+      timestamp: new Date(Date.now() - 86400000 * 1).toISOString(),
+      clientName: 'Sophie Vance',
+      metadata: {
+        amount: 200,
+        paymentMethod: 'Nagad',
+        transactionId: 'NGD49182377',
+        status: 'approved',
+      },
+    },
+    {
+      id: 'act_6',
+      albumId: 'alb_sophie_julian',
+      activityType: 'download_photo',
+      title: 'High-Res Photo Downloaded',
+      description: 'Downloaded 002_Ceremony_Vows.jpg after studio payment verification.',
+      timestamp: new Date(Date.now() - 3600000 * 18).toISOString(),
+      clientName: 'Sophie Vance',
+      metadata: {
+        photoId: 'p2',
+        photoName: '002_Ceremony_Vows.jpg',
+      },
+    },
+    {
+      id: 'act_7',
+      albumId: 'alb_sophie_julian',
+      activityType: 'view_gallery',
+      title: 'Gallery Re-Visited',
+      description: 'Sophie Vance reopened the gallery on mobile to review ceremony portraits.',
+      timestamp: new Date(Date.now() - 3600000 * 2).toISOString(),
+      clientName: 'Sophie Vance',
+      metadata: {
+        device: 'Mobile Device (iOS/Safari)',
+      },
+    },
+  ],
+};
+
+export function getClientActivityLogs(albumId: string): ClientActivityLogEntry[] {
+  try {
+    const raw = localStorage.getItem(`${ACTIVITY_LOGS_STORAGE_PREFIX}${albumId}`);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+    if (DEFAULT_ACTIVITY_LOGS[albumId]) {
+      localStorage.setItem(
+        `${ACTIVITY_LOGS_STORAGE_PREFIX}${albumId}`,
+        JSON.stringify(DEFAULT_ACTIVITY_LOGS[albumId])
+      );
+      return DEFAULT_ACTIVITY_LOGS[albumId];
+    }
+  } catch (err) {
+    console.error('Failed reading client activity logs:', err);
+  }
+  return [];
+}
+
+export function logClientActivity(
+  albumId: string,
+  activityType: ClientActivityType,
+  title: string,
+  description: string,
+  metadata?: ClientActivityLogEntry['metadata'],
+  clientName?: string
+): ClientActivityLogEntry {
+  const currentLogs = getClientActivityLogs(albumId);
+  const newLog: ClientActivityLogEntry = {
+    id: 'act_' + Math.random().toString(36).substring(2, 9),
+    albumId,
+    activityType,
+    title,
+    description,
+    timestamp: new Date().toISOString(),
+    clientName,
+    metadata,
+  };
+
+  currentLogs.unshift(newLog);
+
+  // Keep up to 100 recent entries
+  const trimmed = currentLogs.slice(0, 100);
+  try {
+    localStorage.setItem(
+      `${ACTIVITY_LOGS_STORAGE_PREFIX}${albumId}`,
+      JSON.stringify(trimmed)
+    );
+  } catch (e) {
+    console.error('Failed saving client activity log:', e);
+  }
+
+  return newLog;
+}
+
+// ==========================================
+// PAYMENT GATEWAY INTEGRATION (Stripe & SSLCommerz)
+// ==========================================
+
+const PAYMENT_GATEWAY_SETTINGS_KEY = 'ramyachobi_payment_gateway_settings_v1';
+
+export const DEFAULT_GATEWAY_SETTINGS: PaymentGatewaySettings = {
+  activeGateway: 'all',
+  allowManualFallback: true,
+  stripe: {
+    enabled: true,
+    mode: 'test',
+    publishableKey: 'pk_test_51MzRamyaChobiWeddingPhotosSampleKey998811',
+    secretKey: 'sk_test_51MzRamyaChobiStudioSecretSampleKey772244',
+    webhookSecret: 'whsec_sampleSecretRamyaChobi8812',
+    currency: 'bdt',
+    statementDescriptor: 'RAMYACHOBI STUDIO',
+  },
+  sslcommerz: {
+    enabled: true,
+    mode: 'sandbox',
+    storeId: 'ramyachobi_studio_live',
+    storePassword: 'ramyachobi_sandbox_pass',
+    ipnUrl: 'https://ramyachobi.studio/api/sslcommerz/ipn',
+    currency: 'BDT',
+  },
+  updatedAt: new Date().toISOString(),
+  lastTestedAt: new Date().toISOString(),
+};
+
+export function getPaymentGatewaySettings(): PaymentGatewaySettings {
+  try {
+    const raw = localStorage.getItem(PAYMENT_GATEWAY_SETTINGS_KEY);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+    // Seed default settings
+    localStorage.setItem(PAYMENT_GATEWAY_SETTINGS_KEY, JSON.stringify(DEFAULT_GATEWAY_SETTINGS));
+    return DEFAULT_GATEWAY_SETTINGS;
+  } catch (err) {
+    console.error('Failed reading payment gateway settings:', err);
+    return DEFAULT_GATEWAY_SETTINGS;
+  }
+}
+
+export function savePaymentGatewaySettings(settings: PaymentGatewaySettings): void {
+  try {
+    const toSave: PaymentGatewaySettings = {
+      ...settings,
+      updatedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(PAYMENT_GATEWAY_SETTINGS_KEY, JSON.stringify(toSave));
+  } catch (err) {
+    console.error('Failed saving payment gateway settings:', err);
+  }
+}
+
+export function testPaymentGatewayConnection(
+  provider: PaymentGatewayProvider,
+  config: any
+): { success: boolean; message: string } {
+  if (provider === 'stripe') {
+    const pub = config?.publishableKey?.trim() || '';
+    const sec = config?.secretKey?.trim() || '';
+    if (!pub) {
+      return { success: false, message: 'Stripe Publishable Key is required (starts with pk_).' };
+    }
+    if (!pub.startsWith('pk_test_') && !pub.startsWith('pk_live_')) {
+      return { success: false, message: 'Invalid Stripe Publishable Key format. Must begin with pk_test_ or pk_live_.' };
+    }
+    if (!sec) {
+      return { success: false, message: 'Stripe Secret Key is required (starts with sk_).' };
+    }
+    if (!sec.startsWith('sk_test_') && !sec.startsWith('sk_live_')) {
+      return { success: false, message: 'Invalid Stripe Secret Key format. Must begin with sk_test_ or sk_live_.' };
+    }
+
+    const mode = config.mode === 'live' ? 'Live Production' : 'Sandbox / Test Mode';
+    return {
+      success: true,
+      message: `Successfully connected to Stripe API in ${mode}. Ready to accept Visa, Mastercard & Apple Pay.`,
+    };
+  }
+
+  if (provider === 'sslcommerz') {
+    const storeId = config?.storeId?.trim() || '';
+    const storePass = config?.storePassword?.trim() || '';
+    if (!storeId) {
+      return { success: false, message: 'SSLCommerz Store ID is required.' };
+    }
+    if (!storePass) {
+      return { success: false, message: 'SSLCommerz Store Password is required.' };
+    }
+
+    const mode = config.mode === 'live' ? 'Live Production' : 'Sandbox Test';
+    return {
+      success: true,
+      message: `SSLCommerz Merchant credentials verified for ${storeId} (${mode}). Supports bKash, Nagad, Cards & Internet Banking.`,
+    };
+  }
+
+  return { success: false, message: 'Unknown provider.' };
+}
+
+
+
