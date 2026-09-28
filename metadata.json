@@ -1,0 +1,8 @@
+{
+  "name": "RC Wedding Photo Selection",
+  "description": "Mobile-first wedding photography client proofing and photo selection gallery with Google Drive integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
