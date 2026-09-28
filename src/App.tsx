@@ -33,18 +33,21 @@ export default function App() {
   const [customerGalleryObject, setCustomerGalleryObject] = useState<CustomerGallery | null>(null);
   const [isAdminPreviewing, setIsAdminPreviewing] = useState<boolean>(false);
 
-  // Initialize Auth state listener
+  // Initialize Auth state listener with persistent token recovery
   useEffect(() => {
-    initAuth(
+    const unsubscribe = initAuth(
       (authedUser, token) => {
         setUser(authedUser);
-        setLocalAccessToken(token);
+        setLocalAccessToken(token || null);
       },
       () => {
         setUser(null);
         setLocalAccessToken(null);
       }
     );
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
   }, []);
 
   // Load albums & submissions from storage
@@ -106,7 +109,12 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Google Sign In error:', err);
-      alert('Sign in failed: ' + err.message);
+      if (
+        err.code !== 'auth/popup-closed-by-user' &&
+        err.code !== 'auth/cancelled-popup-request'
+      ) {
+        alert('Google Drive Connection: ' + (err.message || 'Please check your connection and allow popups.'));
+      }
     }
   };
 

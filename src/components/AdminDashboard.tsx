@@ -290,8 +290,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <button
                   onClick={onSignOut}
-                  className="p-2 sm:px-3 sm:py-1.5 rounded-xl border border-stone-800 hover:bg-stone-800 text-stone-400 hover:text-stone-200 text-xs flex items-center gap-1.5 transition"
+                  className="p-2 sm:px-3 sm:py-1.5 rounded-xl border border-stone-800 hover:bg-stone-800 text-stone-400 hover:text-stone-200 text-xs flex items-center gap-1.5 transition cursor-pointer"
                   title="Disconnect Google Drive"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Sign Out</span>
+                </button>
+              </div>
+            ) : user && !accessToken ? (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={onSignIn}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-300 text-xs font-medium flex items-center gap-2 transition cursor-pointer"
+                  title="Your Google Drive access token expired. Click to reconnect without losing your account."
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Reconnect Drive</span>
+                </button>
+                <button
+                  onClick={onSignOut}
+                  className="p-2 sm:px-3 sm:py-1.5 rounded-xl border border-stone-800 hover:bg-stone-800 text-stone-400 hover:text-stone-200 text-xs flex items-center gap-1.5 transition cursor-pointer"
+                  title="Sign Out"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Sign Out</span>
@@ -300,7 +319,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             ) : (
               <button
                 onClick={onSignIn}
-                className="gsi-material-button px-4 py-2 rounded-xl bg-stone-900 border border-amber-500/40 hover:border-amber-400 text-stone-100 text-xs font-medium transition shadow-md flex items-center gap-2"
+                className="gsi-material-button px-4 py-2 rounded-xl bg-stone-900 border border-amber-500/40 hover:border-amber-400 text-stone-100 text-xs font-medium transition shadow-md flex items-center gap-2 cursor-pointer"
               >
                 <div className="w-4 h-4 shrink-0">
                   <svg viewBox="0 0 48 48" className="w-full h-full">
