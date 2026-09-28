@@ -13,20 +13,38 @@ import firebaseConfig from '../../firebase-applet-config.json';
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 
-// Desired Google Drive scopes
-export const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
+// Desired Google Drive scopes (readonly for full drive browsing & search, file for creating non-destructive CLIENT SELECTED folder)
+export const SCOPES = [
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+];
 
 const provider = new GoogleAuthProvider();
 SCOPES.forEach((scope) => provider.addScope(scope));
 // Prompt selection if needed
 provider.setCustomParameters({
   prompt: 'select_account',
+  access_type: 'online',
 });
 
 // Flag to indicate if we are in the middle of a sign-in flow
 let isSigningIn = false;
-// In-memory cache for the access token (per workspace skill instructions: never store in localStorage)
+// In-memory cache for the access token
 let cachedAccessToken: string | null = null;
+let tokenExpiresAt: number | null = null;
+
+export class TokenExpiredError extends Error {
+  constructor(message = 'Google Drive access token has expired or is invalid. Please reconnect.') {
+    super(message);
+    this.name = 'TokenExpiredError';
+  }
+}
+
+export const isTokenExpired = (): boolean => {
+  if (!cachedAccessToken) return true;
+  if (tokenExpiresAt && Date.now() > tokenExpiresAt) return true;
+  return false;
+};
 
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -56,6 +74,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
       throw new Error('Failed to get Google Drive access token from Firebase Auth');
     }
     cachedAccessToken = credential.accessToken;
+    tokenExpiresAt = Date.now() + 3500 * 1000;
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Google Sign In error:', error);
@@ -71,9 +90,11 @@ export const getAccessToken = (): string | null => {
 
 export const setAccessToken = (token: string | null) => {
   cachedAccessToken = token;
+  tokenExpiresAt = token ? Date.now() + 3500 * 1000 : null;
 };
 
 export const logout = async () => {
   await signOut(auth);
   cachedAccessToken = null;
+  tokenExpiresAt = null;
 };

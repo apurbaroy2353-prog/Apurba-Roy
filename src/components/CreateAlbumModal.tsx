@@ -15,7 +15,7 @@ import {
   Send,
 } from 'lucide-react';
 import { Album, DriveFolder, DrivePhoto } from '../types';
-import { DriveFolderPickerModal } from './DriveFolderPickerModal';
+import { DriveFolderPickerModal, DriveFolderSelectionResult } from './DriveFolderPickerModal';
 import { listPhotosInFolder } from '../services/drive';
 
 interface CreateAlbumModalProps {
@@ -41,7 +41,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
   const [selectionLimitEnabled, setSelectionLimitEnabled] = useState(true);
   const [maxSelections, setMaxSelections] = useState('35');
   const [notesForClient, setNotesForClient] = useState('');
-  const [selectedDriveFolder, setSelectedDriveFolder] = useState<DriveFolder | null>(null);
+  const [selectedFolderResult, setSelectedFolderResult] = useState<DriveFolderSelectionResult | null>(null);
 
   const [isDrivePickerOpen, setIsDrivePickerOpen] = useState(false);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
@@ -64,7 +64,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
       return;
     }
 
-    if (!selectedDriveFolder) {
+    if (!selectedFolderResult) {
       setError('Please connect a Google Drive folder for this wedding album.');
       return;
     }
@@ -73,11 +73,14 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
     setIsSyncingDrive(true);
 
     try {
-      // Fetch photos from the selected Google Drive folder
-      let fetchedPhotos: DrivePhoto[] = [];
-      if (accessToken && selectedDriveFolder.id) {
+      // Use scanned preview photos or fetch live
+      let fetchedPhotos: DrivePhoto[] = selectedFolderResult.previewPhotos;
+      if (fetchedPhotos.length === 0 && accessToken && selectedFolderResult.folder.id) {
         try {
-          fetchedPhotos = await listPhotosInFolder(accessToken, selectedDriveFolder.id);
+          fetchedPhotos = await listPhotosInFolder(accessToken, selectedFolderResult.folder.id, {
+            includeSubfolders: selectedFolderResult.includeSubfolders,
+            folderName: selectedFolderResult.folder.name,
+          });
         } catch (syncErr: any) {
           console.warn('Could not auto-fetch photos from drive immediately:', syncErr);
         }
@@ -92,22 +95,32 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
       const parsedMax = parseInt(maxSelections, 10);
       const limitVal = selectionLimitEnabled && !isNaN(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
 
+      const nowIso = new Date().toISOString();
       const newAlbum: Album = {
         id: 'alb_' + Math.random().toString(36).substring(2, 9),
         title: title.trim(),
         coupleNames: coupleNames.trim(),
         weddingDate: weddingDate.trim() || new Date().toISOString().split('T')[0],
         clientEmail: clientEmail.trim() || undefined,
-        driveFolderId: selectedDriveFolder.id,
-        driveFolderName: selectedDriveFolder.name,
+        driveFolderId: selectedFolderResult.folder.id,
+        driveFolderName: selectedFolderResult.folder.name,
+        includeSubfolders: selectedFolderResult.includeSubfolders,
         slug,
         selectionLimitEnabled: selectionLimitEnabled && Boolean(limitVal),
         maxSelectionsAllowed: limitVal,
         notesForClient: notesForClient.trim() || undefined,
         coverPhotoUrl: fetchedPhotos[0]?.thumbnailLink || undefined,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        lastSyncedAt: nowIso,
         cachedPhotos: fetchedPhotos,
+        syncStats: {
+          lastSynced: nowIso,
+          newPhotos: fetchedPhotos.length,
+          updatedPhotos: 0,
+          missingPhotos: 0,
+          totalPhotos: fetchedPhotos.length,
+        },
       };
 
       onCreateAlbum(newAlbum, sendNotificationOnCreate);
@@ -237,7 +250,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
               <div
                 onClick={handleOpenDrivePicker}
                 className={`p-3.5 rounded-xl border border-dashed cursor-pointer transition flex items-center justify-between ${
-                  selectedDriveFolder
+                  selectedFolderResult
                     ? 'bg-amber-500/10 border-amber-500/50 text-stone-200'
                     : 'bg-stone-950/60 border-stone-700 hover:border-stone-500 text-stone-400'
                 }`}
@@ -245,23 +258,28 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
                 <div className="flex items-center gap-3">
                   <div
                     className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
-                      selectedDriveFolder ? 'bg-amber-500 text-stone-950' : 'bg-stone-800 text-stone-400'
+                      selectedFolderResult ? 'bg-amber-500 text-stone-950' : 'bg-stone-800 text-stone-400'
                     }`}
                   >
                     <HardDrive className="w-5 h-5" />
                   </div>
                   <div>
-                    {selectedDriveFolder ? (
+                    {selectedFolderResult ? (
                       <>
-                        <p className="font-semibold text-stone-100 text-sm">{selectedDriveFolder.name}</p>
-                        <p className="text-[11px] text-stone-400">Folder Connected</p>
+                        <p className="font-semibold text-stone-100 text-sm">{selectedFolderResult.folder.name}</p>
+                        <p className="text-[11px] text-emerald-400 flex items-center gap-1.5 mt-0.5">
+                          <span>{selectedFolderResult.previewPhotos.length} Photos Detected</span>
+                          {selectedFolderResult.includeSubfolders && (
+                            <span className="text-[10px] text-stone-400 font-mono">• (Subfolders Included)</span>
+                          )}
+                        </p>
                       </>
                     ) : (
                       <>
                         <p className="font-medium text-stone-300 text-xs">
-                          {accessToken ? 'Click to select Google Drive folder' : 'Connect Google Drive first'}
+                          {accessToken ? 'Click to browse & select Google Drive folder' : 'Connect Google Drive first'}
                         </p>
-                        <p className="text-[11px] text-stone-500">Pick from your Drive folders</p>
+                        <p className="text-[11px] text-stone-500">Browse My Drive, Search, Recent, or Paste Link</p>
                       </>
                     )}
                   </div>
@@ -271,7 +289,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
                   type="button"
                   className="px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 text-xs font-medium transition"
                 >
-                  {selectedDriveFolder ? 'Change Folder' : 'Browse Drive'}
+                  {selectedFolderResult ? 'Change Folder' : 'Browse Drive'}
                 </button>
               </div>
             </div>
@@ -398,7 +416,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isSyncingDrive || !selectedDriveFolder}
+                disabled={isSyncingDrive || !selectedFolderResult}
                 className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-stone-950 font-semibold text-xs rounded-xl transition shadow-lg flex items-center gap-2"
               >
                 {isSyncingDrive ? (
@@ -424,7 +442,7 @@ export const CreateAlbumModal: React.FC<CreateAlbumModalProps> = ({
           accessToken={accessToken}
           isOpen={isDrivePickerOpen}
           onClose={() => setIsDrivePickerOpen(false)}
-          onSelectFolder={(folder) => setSelectedDriveFolder(folder)}
+          onSelectFolder={(result) => setSelectedFolderResult(result)}
         />
       )}
     </>

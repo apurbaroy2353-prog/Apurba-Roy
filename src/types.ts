@@ -12,6 +12,9 @@ export interface DrivePhoto {
   iconLink?: string;
   size?: string;
   createdTime?: string;
+  modifiedTime?: string;
+  folderId?: string;
+  folderName?: string;
   imageMediaMetadata?: {
     width?: number;
     height?: number;
@@ -28,6 +31,24 @@ export interface DriveFolder {
   name: string;
   mimeType: string;
   createdTime?: string;
+  modifiedTime?: string;
+  parents?: string[];
+  photoCount?: number;
+  driveId?: string; // For Shared Drives
+  sharedWithMe?: boolean;
+}
+
+export interface DriveSharedDrive {
+  id: string;
+  name: string;
+}
+
+export interface DriveSyncStats {
+  lastSynced: string;
+  newPhotos: number;
+  updatedPhotos: number;
+  missingPhotos: number;
+  totalPhotos: number;
 }
 
 export type SubmissionStatus = 'completed' | 'in_progress';
@@ -117,6 +138,18 @@ export interface Album {
   clientDownloadAllowed?: boolean; // Admin master switch for client downloads (default: true)
   // cached photos for instant preview / fallback if needed
   cachedPhotos?: DrivePhoto[];
+  // Google Drive Connection & Sync Details
+  driveAccount?: string; // Connected Google Drive email
+  lastSyncedAt?: string;
+  includeSubfolders?: boolean; // Default true: scan child folders
+  syncStats?: DriveSyncStats;
+  // Final Delivery Folder Support
+  finalDeliveryFolderId?: string;
+  finalDeliveryFolderName?: string;
+  finalDeliveryPhotos?: DrivePhoto[];
+  finalDeliveryLastSyncedAt?: string;
+  // Created 'CLIENT SELECTED' folder ID in Drive
+  clientSelectedFolderId?: string;
 }
 
 export interface FaceMatchScore {
