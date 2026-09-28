@@ -1,11 +1,9 @@
 {
-  "projectId": "gen-lang-client-0801112470",
-  "appId": "1:492633549908:web:3593ab0a8b56b3152e91c1",
-  "apiKey": "AIzaSyBryRJbTSlZ46QmWakl3szVYjsGUgWKYe4",
-  "authDomain": "gen-lang-client-0801112470.firebaseapp.com",
-  "storageBucket": "gen-lang-client-0801112470.firebasestorage.app",
-  "messagingSenderId": "492633549908",
-  "measurementId": "",
-  "oAuthClientId": "492633549908-2dcu2o6vt94oo939q2na4ajog1t47qjk.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "apiKey": "AIzaSyCjP7c922fCV48Nhfa2PC_hBmEaAwrU0wc",
+  "authDomain": "rcfoto-a2c8a.firebaseapp.com",
+  "projectId": "rcfoto-a2c8a",
+  "storageBucket": "rcfoto-a2c8a.firebasestorage.app",
+  "messagingSenderId": "22438546867",
+  "appId": "1:22438546867:web:f65c50ea30472a05d38fc6",
+  "measurementId": "G-CN1PTY5TK9"
 }
