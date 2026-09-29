@@ -6,6 +6,9 @@ import {
   logout,
   getAccessToken,
   setAccessToken,
+  signInClientAnonymously,
+  ensureAnonymousAuth,
+  auth,
 } from './services/auth';
 import {
   getStoredAlbums,
@@ -33,16 +36,38 @@ export default function App() {
   const [customerGalleryObject, setCustomerGalleryObject] = useState<CustomerGallery | null>(null);
   const [isAdminPreviewing, setIsAdminPreviewing] = useState<boolean>(false);
 
+  // Automatically sign in clients anonymously upon mounting when no user is detected, ensuring session for Firestore access
+  useEffect(() => {
+    const handleInitialAnonymousAuth = async () => {
+      try {
+        if (!auth.currentUser) {
+          await signInClientAnonymously();
+        }
+      } catch (err) {
+        console.warn('Initial anonymous client sign-in notice:', err);
+      }
+    };
+    handleInitialAnonymousAuth();
+  }, []);
+
   // Initialize Auth state listener with persistent token recovery
   useEffect(() => {
     const unsubscribe = initAuth(
       (authedUser, token) => {
+        // Authenticated Google admin user
         setUser(authedUser);
         setLocalAccessToken(token || null);
       },
-      () => {
+      (anonOrNullUser?: User | null) => {
+        // Anonymous client or logged out of admin
         setUser(null);
         setLocalAccessToken(null);
+        // Ensure anonymous session is maintained if completely unauthenticated
+        if (!anonOrNullUser && !auth.currentUser) {
+          signInClientAnonymously().catch((err) => {
+            console.warn('Anonymous session maintenance notice:', err);
+          });
+        }
       }
     );
     return () => {
@@ -62,30 +87,47 @@ export default function App() {
   useEffect(() => {
     const { loadedAlbums } = loadData();
 
-    // 1. Check Customer Gallery selection link (/select/:token or ?select=:token or #select/:token)
-    const pathname = window.location.pathname;
-    const searchParams = new URLSearchParams(window.location.search);
-    const hash = window.location.hash;
+    // 1. Check Project / Customer Gallery selection link: /gallery/:projectId or /select/:token
+    const parseUrlToken = () => {
+      const pathname = window.location.pathname;
+      const searchParams = new URLSearchParams(window.location.search);
+      const hash = window.location.hash;
 
-    let tokenMatch: string | null = null;
-    if (pathname.includes('/select/')) {
-      const parts = pathname.split('/select/');
-      if (parts[1]) tokenMatch = parts[1].split('/')[0].split('?')[0];
-    } else if (searchParams.get('select')) {
-      tokenMatch = searchParams.get('select');
-    } else if (hash.includes('select/')) {
-      const parts = hash.split('select/');
-      if (parts[1]) tokenMatch = parts[1].split('/')[0].split('?')[0];
-    }
+      let matchId: string | null = null;
+      if (pathname.includes('/gallery/')) {
+        const parts = pathname.split('/gallery/');
+        if (parts[1]) matchId = parts[1].split('/')[0].split('?')[0];
+      } else if (pathname.includes('/select/')) {
+        const parts = pathname.split('/select/');
+        if (parts[1]) matchId = parts[1].split('/')[0].split('?')[0];
+      } else if (searchParams.get('gallery')) {
+        matchId = searchParams.get('gallery');
+      } else if (searchParams.get('project')) {
+        matchId = searchParams.get('project');
+      } else if (searchParams.get('select')) {
+        matchId = searchParams.get('select');
+      } else if (hash.includes('gallery/')) {
+        const parts = hash.split('gallery/');
+        if (parts[1]) matchId = parts[1].split('/')[0].split('?')[0];
+      } else if (hash.includes('select/')) {
+        const parts = hash.split('select/');
+        if (parts[1]) matchId = parts[1].split('/')[0].split('?')[0];
+      }
 
-    if (tokenMatch) {
-      setCustomerGalleryToken(tokenMatch);
-      setViewMode('customer_gallery');
-      setIsAdminPreviewing(false);
-      return;
-    }
+      if (matchId) {
+        setCustomerGalleryToken(matchId);
+        setViewMode('customer_gallery');
+        setIsAdminPreviewing(false);
+        return true;
+      }
+      return false;
+    };
+
+    const hasGallery = parseUrlToken();
+    if (hasGallery) return;
 
     // 2. Check legacy album parameters: e.g. ?album=sophie-julian-wedding
+    const searchParams = new URLSearchParams(window.location.search);
     const albumSlug = searchParams.get('album');
     if (albumSlug) {
       const match = loadedAlbums.find(
@@ -97,6 +139,12 @@ export default function App() {
         setIsAdminPreviewing(false);
       }
     }
+
+    const handlePopState = () => {
+      parseUrlToken();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   const handleSignIn = async () => {
@@ -148,8 +196,8 @@ export default function App() {
   };
 
   const handleBackToAdmin = () => {
-    // Clean url query if viewing
-    window.history.replaceState({}, '', window.location.pathname.replace(/\/select\/.*$/, ''));
+    // Clean url query and path if viewing
+    window.history.replaceState({}, '', window.location.pathname.replace(/\/(gallery|select)\/.*$/, '') || '/');
     setViewMode('admin');
     setCurrentClientAlbum(null);
     setCustomerGalleryToken(null);

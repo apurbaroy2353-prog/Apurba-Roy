@@ -1,5 +1,83 @@
 {
   "entities": {
+    "project": {
+      "title": "Photo Selection Project",
+      "description": "Primary project document for client photo curation and album proofing.",
+      "type": "object",
+      "properties": {
+        "adminUid": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientEmail": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "galleryName": { "type": "string" },
+        "eventName": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "submitted", "revision_requested", "approved", "closed", "active", "selection_in_progress", "locked", "expired", "disabled"]
+        },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "submittedAt": { "type": "string" },
+        "totalPhotos": { "type": "number" },
+        "selectedCount": { "type": "number" },
+        "driveFolderId": { "type": "string" },
+        "driveFolderName": { "type": "string" },
+        "secureToken": { "type": "string" },
+        "maxSelections": { "type": "number" },
+        "zipRequested": { "type": "boolean" },
+        "zipRequestedAt": { "type": "string" },
+        "zipRequestStatus": { "type": "string", "enum": ["pending", "ready", "delivered"] },
+        "zipRequestNotes": { "type": "string" },
+        "zipRequestEmail": { "type": "string" },
+        "zipRequestPhone": { "type": "string" },
+        "zipRequestedCount": { "type": "number" },
+        "zipDownloadUrl": { "type": "string" },
+        "zipFulfilledAt": { "type": "string" },
+        "zipAdminNotes": { "type": "string" }
+      },
+      "required": ["adminUid", "clientName", "galleryName", "status"]
+    },
+    "projectPhoto": {
+      "title": "Project Photo Record",
+      "description": "Individual photo metadata synced from Google Drive.",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string" },
+        "driveFileId": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "previewUrl": { "type": "string" },
+        "downloadUrl": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["fileName", "driveFileId", "thumbnailUrl", "previewUrl"]
+    },
+    "projectSelection": {
+      "title": "Project Photo Selection",
+      "description": "Selected photo record created by client in a project.",
+      "type": "object",
+      "properties": {
+        "photoId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "selectedBy": { "type": "string" },
+        "selectedAt": { "type": "string" }
+      },
+      "required": ["photoId", "fileName", "selectedAt"]
+    },
+    "photographerProfile": {
+      "title": "Photographer Profile & Drive Connection",
+      "description": "Photographer settings and server-persisted Google Drive OAuth credentials.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "driveConnected": { "type": "boolean" },
+        "accessToken": { "type": "string" },
+        "tokenExpiresAt": { "type": "number" },
+        "lastConnectedAt": { "type": "string" }
+      },
+      "required": ["uid", "driveConnected"]
+    },
     "customerGallery": {
       "title": "Customer Gallery",
       "description": "A client photo-selection gallery created by a photographer linked to Google Drive photos with a secure access token.",
@@ -68,9 +146,47 @@
         "deviceInfoOptional": { "type": "string" }
       },
       "required": ["sessionId", "galleryId", "galleryToken", "recoveryCode", "status"]
+    },
+    "selectionHistoryEntry": {
+      "title": "Selection History Snapshot",
+      "description": "Historical snapshot of client photo selections enabling undo/redo and past state viewing.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "string", "enum": ["select", "deselect", "batch_select", "clear", "undo", "redo", "restore_snapshot", "initial"] },
+        "description": { "type": "string" },
+        "selectedPhotoIds": { "type": "array", "items": { "type": "string" } },
+        "selectedCount": { "type": "number" },
+        "affectedPhotoId": { "type": "string" },
+        "affectedPhotoName": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "clientName": { "type": "string" }
+      },
+      "required": ["action", "selectedPhotoIds", "selectedCount", "timestamp"]
     }
   },
   "firestore": {
+    "/projects/{projectId}": {
+      "schema": "project",
+      "description": "Main project documents representing customer galleries."
+    },
+    "/projects/{projectId}/photos/{photoId}": {
+      "schema": "projectPhoto",
+      "description": "Photos belonging to a project with Google Drive thumbnail and preview URLs."
+    },
+    "/projects/{projectId}/selections/{photoId}": {
+      "schema": "projectSelection",
+      "description": "Individual selections made by clients in real time."
+    },
+    "/projects/{projectId}/selection_history/{historyId}": {
+      "schema": "selectionHistoryEntry",
+      "description": "Subcollection tracking timeline of selection changes, undo/redo states, and snapshots."
+    },
+    "/photographerProfiles/{uid}": {
+      "schema": "photographerProfile",
+      "description": "Secure photographer profile and OAuth tokens."
+    },
     "/customerGalleries/{galleryId}": {
       "schema": "customerGallery",
       "description": "Stores customer proofing galleries created by photographers."

@@ -10,19 +10,23 @@ import {
   where,
   onSnapshot,
   orderBy,
+  limit,
   serverTimestamp,
+  writeBatch,
 } from 'firebase/firestore';
-import { db } from './auth';
+import { db, auth } from './auth';
 import {
   CustomerGallery,
   CustomerGalleryPhoto,
   CustomerPhotoSelection,
   CustomerGalleryStatus,
+  SelectionHistoryEntry,
+  SelectionHistoryAction,
 } from '../types';
 
 const LOCAL_STORAGE_GALLERIES_KEY = 'rcfoto_customer_galleries_v1';
 
-// Seed example gallery matching prompt requirements (Rahim & Ayesha Wedding)
+// Seed fallback example gallery for initial demo
 const INITIAL_SEED_GALLERIES: CustomerGallery[] = [
   {
     id: 'cg_rahim_ayesha',
@@ -40,24 +44,15 @@ const INITIAL_SEED_GALLERIES: CustomerGallery[] = [
     allowDownloads: true,
     allowEditing: true,
     status: 'selection_in_progress',
-    totalPhotos: 1245,
-    selectedCount: 32,
+    totalPhotos: 24,
+    selectedCount: 5,
     createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
     updatedAt: new Date(Date.now() - 3600000 * 2).toISOString(),
     lastActivity: '2 minutes ago',
     coverPhotoUrl: 'https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=1200&q=80',
-    notesForCustomer: 'Welcome to your wedding proofing gallery! Please select your top 100 photos for your handcrafted wedding album. Click any photo to preview in high resolution.',
-    selectedPhotoIds: [
-      'p_sample_01', 'p_sample_02', 'p_sample_03', 'p_sample_04', 'p_sample_05',
-      'p_sample_06', 'p_sample_07', 'p_sample_08', 'p_sample_09', 'p_sample_10',
-      'p_sample_11', 'p_sample_12', 'p_sample_13', 'p_sample_14', 'p_sample_15',
-      'p_sample_16', 'p_sample_17', 'p_sample_18', 'p_sample_19', 'p_sample_20',
-      'p_sample_21', 'p_sample_22', 'p_sample_23', 'p_sample_24', 'p_sample_25',
-      'p_sample_26', 'p_sample_27', 'p_sample_28', 'p_sample_29', 'p_sample_30',
-      'p_sample_31', 'p_sample_32',
-    ],
-    photos: Array.from({ length: 48 }).map((_, i) => {
-      const numStr = String(i + 1).padStart(4, '0');
+    notesForCustomer: 'Welcome to your wedding proofing gallery! Please select your top photos for your album. Click any photo to preview in high resolution.',
+    selectedPhotoIds: ['p_sample_01', 'p_sample_02', 'p_sample_03', 'p_sample_04', 'p_sample_05'],
+    photos: Array.from({ length: 24 }).map((_, i) => {
       const photoId = `p_sample_${String(i + 1).padStart(2, '0')}`;
       const sampleImages = [
         'https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=800&q=80',
@@ -82,47 +77,6 @@ const INITIAL_SEED_GALLERIES: CustomerGallery[] = [
       };
     }),
   },
-  {
-    id: 'cg_tanvir_samira',
-    customerName: 'Tanvir & Samira',
-    eventName: 'Engagement Ceremony',
-    galleryName: 'Selected Highlights',
-    customerPhone: '+8801812345678',
-    customerEmail: 'samira.tanvir@example.com',
-    driveFolderId: 'folder_tanvir_engagement_2026',
-    driveFolderName: 'Tanvir & Samira Engagement - Preview',
-    secureToken: 'K9pX2mQ8vL4t7Wz',
-    pinEnabled: true,
-    // SHA-256 hash for PIN "1234"
-    pinHash: '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
-    maxSelections: 50,
-    selectionDeadline: '2026-11-01',
-    allowDownloads: false,
-    allowEditing: false,
-    status: 'submitted',
-    totalPhotos: 420,
-    selectedCount: 45,
-    createdAt: new Date(Date.now() - 86400000 * 7).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-    submittedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-    lastActivity: '1 day ago',
-    coverPhotoUrl: 'https://images.unsplash.com/photo-1511285560929-80b456fea0bc?auto=format&fit=crop&w=1200&q=80',
-    notesForCustomer: 'Private engagement gallery protected by PIN. Thank you for choosing RC Foto!',
-    selectedPhotoIds: Array.from({ length: 45 }).map((_, i) => `p_tanvir_${i + 1}`),
-    photos: Array.from({ length: 30 }).map((_, i) => {
-      const photoId = `p_tanvir_${i + 1}`;
-      return {
-        id: photoId,
-        driveFileId: `drive_file_id_${photoId}`,
-        name: `DSC_${5000 + i}.JPG`,
-        thumbnailUrl: 'https://images.unsplash.com/photo-1511285560929-80b456fea0bc?auto=format&fit=crop&w=800&q=80',
-        previewUrl: 'https://images.unsplash.com/photo-1511285560929-80b456fea0bc?auto=format&fit=crop&w=1600&q=80',
-        mimeType: 'image/jpeg',
-        size: '14.2 MB',
-        createdTime: '2026-09-10T12:00:00Z',
-      };
-    }),
-  },
 ];
 
 /**
@@ -143,7 +97,47 @@ export function generateSecureToken(length = 15): string {
 }
 
 /**
- * Compute SHA-256 hash of a string using Web Crypto API
+ * Generate reliable Google Drive Thumbnail URL
+ */
+export function generateDriveThumbnailUrl(driveFileId: string, rawThumbnail?: string): string {
+  if (rawThumbnail && rawThumbnail.startsWith('http')) {
+    if (rawThumbnail.includes('=s')) {
+      return rawThumbnail.replace(/=s\d+.*$/, '=w800');
+    }
+    return rawThumbnail;
+  }
+  return `https://drive.google.com/thumbnail?id=${driveFileId}&sz=w800`;
+}
+
+/**
+ * Generate reliable Google Drive Large Preview URL for Lightbox
+ * Avoids broken HTML webViewLinks
+ */
+export function generateDrivePreviewUrl(driveFileId: string, rawThumbnail?: string): string {
+  if (rawThumbnail && rawThumbnail.startsWith('http')) {
+    if (rawThumbnail.includes('=s')) {
+      return rawThumbnail.replace(/=s\d+.*$/, '=w2048');
+    }
+    if (rawThumbnail.includes('unsplash.com')) {
+      return rawThumbnail.replace('&w=800', '&w=1800');
+    }
+    return rawThumbnail;
+  }
+  return `https://drive.google.com/thumbnail?id=${driveFileId}&sz=w2048`;
+}
+
+/**
+ * Generate reliable Google Drive Download URL
+ */
+export function generateDriveDownloadUrl(driveFileId: string, webContentLink?: string): string {
+  if (webContentLink && webContentLink.startsWith('http')) {
+    return webContentLink;
+  }
+  return `https://drive.google.com/uc?export=download&id=${driveFileId}`;
+}
+
+/**
+ * Compute SHA-256 hash of a PIN string using Web Crypto API
  */
 export async function hashPin(pin: string): Promise<string> {
   const normalized = pin.trim();
@@ -154,7 +148,6 @@ export async function hashPin(pin: string): Promise<string> {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
-  // Simple deterministic fallback if crypto.subtle is unavailable
   let hash = 0;
   for (let i = 0; i < normalized.length; i++) {
     const char = normalized.charCodeAt(i);
@@ -202,29 +195,49 @@ export function saveLocalCustomerGalleries(galleries: CustomerGallery[]): void {
 }
 
 /**
- * Get all Customer Galleries (from Firestore with LocalStorage fallback)
+ * Get all Customer Galleries / Projects (from Firestore with LocalStorage fallback)
  */
 export async function getCustomerGalleries(ownerUid?: string): Promise<CustomerGallery[]> {
   try {
-    const collRef = collection(db, 'customerGalleries');
+    const collRef = collection(db, 'projects');
     const snapshot = await getDocs(collRef);
     if (!snapshot.empty) {
-      const remoteGalleries: CustomerGallery[] = [];
-      snapshot.forEach((docSnap) => {
-        remoteGalleries.push({
-          id: docSnap.id,
-          ...(docSnap.data() as Omit<CustomerGallery, 'id'>),
+      const list: CustomerGallery[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        list.push({
+          id: d.id,
+          ownerUid: data.adminUid,
+          customerName: data.clientName || 'Client',
+          customerEmail: data.clientEmail,
+          customerPhone: data.clientPhone,
+          eventName: data.eventName || 'Event',
+          galleryName: data.galleryName || 'Gallery',
+          driveFolderId: data.driveFolderId || '',
+          driveFolderName: data.driveFolderName || '',
+          secureToken: data.secureToken || d.id,
+          pinEnabled: !!data.pinEnabled,
+          maxSelections: data.maxSelections || 100,
+          selectionDeadline: data.selectionDeadline || '',
+          allowDownloads: data.allowDownloads !== false,
+          allowEditing: data.allowEditing !== false,
+          status: (data.status || 'draft') as CustomerGalleryStatus,
+          totalPhotos: data.totalPhotos || 0,
+          selectedCount: data.selectedCount || 0,
+          createdAt: data.createdAt || new Date().toISOString(),
+          updatedAt: data.updatedAt || new Date().toISOString(),
+          submittedAt: data.submittedAt || undefined,
+          coverPhotoUrl: data.coverPhotoUrl,
+          notesForCustomer: data.notesForCustomer,
         });
       });
-
-      // Filter by ownerUid if provided and galleries have ownerUid
-      const filtered = ownerUid
-        ? remoteGalleries.filter((g) => !g.ownerUid || g.ownerUid === ownerUid)
-        : remoteGalleries;
-
-      // Merge and cache locally
-      saveLocalCustomerGalleries(filtered.length > 0 ? filtered : remoteGalleries);
-      return filtered.length > 0 ? filtered : remoteGalleries;
+      list.sort(
+        (a, b) =>
+          new Date(b.updatedAt || b.createdAt).getTime() -
+          new Date(a.updatedAt || a.createdAt).getTime()
+      );
+      saveLocalCustomerGalleries(list);
+      return list;
     }
   } catch (err) {
     console.warn('Firestore getCustomerGalleries failed, using local cache:', err);
@@ -233,62 +246,505 @@ export async function getCustomerGalleries(ownerUid?: string): Promise<CustomerG
 }
 
 /**
- * Get Customer Gallery by its secure token (used by the customer without login)
- */
-export async function getCustomerGalleryByToken(token: string): Promise<CustomerGallery | null> {
-  if (!token) return null;
-  const cleanToken = token.trim();
-
-  // Try Firestore first
-  try {
-    const collRef = collection(db, 'customerGalleries');
-    const q = query(collRef, where('secureToken', '==', cleanToken));
-    const snapshot = await getDocs(q);
-    if (!snapshot.empty) {
-      const docSnap = snapshot.docs[0];
-      const data = docSnap.data() as Omit<CustomerGallery, 'id'>;
-      return { id: docSnap.id, ...data };
-    }
-  } catch (err) {
-    console.warn('Firestore getCustomerGalleryByToken failed, checking local cache:', err);
-  }
-
-  // Fallback to local storage
-  const locals = getLocalCustomerGalleries();
-  const match = locals.find((g) => g.secureToken === cleanToken || g.id === cleanToken);
-  return match || null;
-}
-
-/**
- * Save or Update a Customer Gallery (photographer action)
+ * Save or Update a Project in Firestore (and customerGalleries for backwards compatibility)
  */
 export async function saveCustomerGallery(gallery: CustomerGallery): Promise<void> {
-  // Update local storage immediately for fast UI
+  const nowIso = new Date().toISOString();
+  const updatedGallery: CustomerGallery = {
+    ...gallery,
+    updatedAt: nowIso,
+  };
+
+  // Update local storage cache
   const locals = getLocalCustomerGalleries();
   const existingIdx = locals.findIndex((g) => g.id === gallery.id);
   let updatedLocals: CustomerGallery[];
   if (existingIdx >= 0) {
     updatedLocals = [...locals];
-    updatedLocals[existingIdx] = { ...gallery, updatedAt: new Date().toISOString() };
+    updatedLocals[existingIdx] = updatedGallery;
   } else {
-    updatedLocals = [gallery, ...locals];
+    updatedLocals = [updatedGallery, ...locals];
   }
   saveLocalCustomerGalleries(updatedLocals);
 
-  // Sync to Firestore
+  // Write to Firestore: projects/{projectId} and customerGalleries/{galleryId}
   try {
-    const docRef = doc(db, 'customerGalleries', gallery.id);
-    await setDoc(docRef, {
-      ...gallery,
-      updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    const adminUid = gallery.ownerUid || auth.currentUser?.uid || 'admin';
+    const projectDocRef = doc(db, 'projects', gallery.id);
+    const galleryDocRef = doc(db, 'customerGalleries', gallery.id);
+
+    const projectData = {
+      adminUid,
+      clientName: gallery.customerName,
+      clientEmail: gallery.customerEmail || '',
+      clientPhone: gallery.customerPhone || '',
+      galleryName: gallery.galleryName,
+      eventName: gallery.eventName,
+      status: gallery.status,
+      createdAt: gallery.createdAt || nowIso,
+      updatedAt: nowIso,
+      submittedAt: gallery.submittedAt || null,
+      totalPhotos: gallery.photos?.length || gallery.totalPhotos || 0,
+      selectedCount: gallery.selectedPhotoIds?.length || gallery.selectedCount || 0,
+      driveFolderId: gallery.driveFolderId,
+      driveFolderName: gallery.driveFolderName,
+      secureToken: gallery.secureToken,
+      maxSelections: gallery.maxSelections,
+      selectionDeadline: gallery.selectionDeadline || '',
+      allowDownloads: gallery.allowDownloads !== false,
+      allowEditing: gallery.allowEditing !== false,
+      pinEnabled: !!gallery.pinEnabled,
+      pinHash: gallery.pinHash || '',
+      coverPhotoUrl: gallery.coverPhotoUrl || (gallery.photos?.[0]?.thumbnailUrl) || '',
+      notesForCustomer: gallery.notesForCustomer || '',
+    };
+
+    // Parallel writes with merge
+    await Promise.all([
+      setDoc(projectDocRef, projectData, { merge: true }),
+      setDoc(galleryDocRef, { ...updatedGallery, ownerUid: adminUid }, { merge: true }),
+    ]);
+
+    // Save photos into projects/{projectId}/photos/{photoId} subcollection if photos provided
+    if (gallery.photos && gallery.photos.length > 0) {
+      const photosBatch = writeBatch(db);
+      gallery.photos.slice(0, 300).forEach((photo) => {
+        const photoDocRef = doc(db, 'projects', gallery.id, 'photos', photo.id);
+        photosBatch.set(
+          photoDocRef,
+          {
+            fileName: photo.name,
+            driveFileId: photo.driveFileId || photo.id,
+            thumbnailUrl: photo.thumbnailUrl,
+            previewUrl: photo.previewUrl,
+            downloadUrl: generateDriveDownloadUrl(photo.driveFileId || photo.id),
+            createdAt: photo.createdTime || nowIso,
+            size: photo.size || '',
+          },
+          { merge: true }
+        );
+      });
+      await photosBatch.commit().catch((err) => {
+        console.warn('Batch write for project photos subcollection notice:', err);
+      });
+    }
   } catch (err) {
-    console.warn('Firestore saveCustomerGallery failed (cached locally):', err);
+    console.warn('Firestore save project failed (cached locally):', err);
   }
 }
 
 /**
- * Customer updates photo selections (unauthenticated or direct token access)
+ * Fetch a Project or Gallery from Firestore (with photos and existing selections)
+ * Accepts either projectId, galleryId, or secureToken.
+ */
+export async function getCustomerGalleryByToken(identifier: string): Promise<CustomerGallery | null> {
+  if (!identifier) return null;
+  const cleanId = identifier.trim();
+
+  let foundData: any = null;
+  let resolvedId = cleanId;
+
+  // 1. Try directly fetching projects/{cleanId}
+  try {
+    const projSnap = await getDoc(doc(db, 'projects', cleanId));
+    if (projSnap.exists()) {
+      foundData = projSnap.data();
+      resolvedId = projSnap.id;
+    }
+  } catch (err) {
+    console.warn('Project doc direct fetch notice:', err);
+  }
+
+  // 2. Try directly fetching customerGalleries/{cleanId}
+  if (!foundData) {
+    try {
+      const galSnap = await getDoc(doc(db, 'customerGalleries', cleanId));
+      if (galSnap.exists()) {
+        foundData = galSnap.data();
+        resolvedId = galSnap.id;
+      }
+    } catch (err) {
+      console.warn('Gallery doc direct fetch notice:', err);
+    }
+  }
+
+  // 3. Search by secureToken in projects collection
+  if (!foundData) {
+    try {
+      const qProj = query(collection(db, 'projects'), where('secureToken', '==', cleanId));
+      const snapProj = await getDocs(qProj);
+      if (!snapProj.empty) {
+        foundData = snapProj.docs[0].data();
+        resolvedId = snapProj.docs[0].id;
+      }
+    } catch (err) {
+      console.warn('Project query by token notice:', err);
+    }
+  }
+
+  // 4. Search by secureToken in customerGalleries collection
+  if (!foundData) {
+    try {
+      const qGal = query(collection(db, 'customerGalleries'), where('secureToken', '==', cleanId));
+      const snapGal = await getDocs(qGal);
+      if (!snapGal.empty) {
+        foundData = snapGal.docs[0].data();
+        resolvedId = snapGal.docs[0].id;
+      }
+    } catch (err) {
+      console.warn('Gallery query by token notice:', err);
+    }
+  }
+
+  // 5. If found in Firestore, load photos and selections subcollections
+  if (foundData) {
+    let photos: CustomerGalleryPhoto[] = foundData.photos || [];
+
+    // Try loading photos from subcollection if empty
+    if (!photos || photos.length === 0) {
+      try {
+        const photosSnap = await getDocs(collection(db, 'projects', resolvedId, 'photos'));
+        if (!photosSnap.empty) {
+          photos = photosSnap.docs.map((d) => {
+            const p = d.data();
+            return {
+              id: d.id,
+              driveFileId: p.driveFileId || d.id,
+              name: p.fileName || d.id,
+              thumbnailUrl: p.thumbnailUrl,
+              previewUrl: p.previewUrl,
+              createdTime: p.createdAt,
+              size: p.size,
+            };
+          });
+        }
+      } catch (err) {
+        console.warn('Could not load photos subcollection:', err);
+      }
+    }
+
+    // Load selections from subcollection projects/{resolvedId}/selections
+    let selectedPhotoIds: string[] = foundData.selectedPhotoIds || [];
+    try {
+      const selectionsSnap = await getDocs(collection(db, 'projects', resolvedId, 'selections'));
+      if (!selectionsSnap.empty) {
+        selectedPhotoIds = selectionsSnap.docs.map((d) => d.id);
+      }
+    } catch (err) {
+      console.warn('Selections subcollection load notice:', err);
+    }
+
+    const unifiedGallery: CustomerGallery = {
+      id: resolvedId,
+      ownerUid: foundData.adminUid || foundData.ownerUid,
+      customerName: foundData.clientName || foundData.customerName || 'Client',
+      customerEmail: foundData.clientEmail || foundData.customerEmail,
+      customerPhone: foundData.clientPhone || foundData.customerPhone,
+      eventName: foundData.eventName || 'Event',
+      galleryName: foundData.galleryName || 'Photo Selection',
+      driveFolderId: foundData.driveFolderId || '',
+      driveFolderName: foundData.driveFolderName || '',
+      secureToken: foundData.secureToken || resolvedId,
+      pinEnabled: !!foundData.pinEnabled,
+      pinHash: foundData.pinHash,
+      maxSelections: foundData.maxSelections || 100,
+      selectionDeadline: foundData.selectionDeadline || '',
+      allowDownloads: foundData.allowDownloads !== false,
+      allowEditing: foundData.allowEditing !== false,
+      status: (foundData.status || 'draft') as CustomerGalleryStatus,
+      totalPhotos: photos.length || foundData.totalPhotos || 0,
+      selectedCount: selectedPhotoIds.length,
+      createdAt: foundData.createdAt || new Date().toISOString(),
+      updatedAt: foundData.updatedAt || new Date().toISOString(),
+      submittedAt: foundData.submittedAt || undefined,
+      photos,
+      selectedPhotoIds,
+      coverPhotoUrl: foundData.coverPhotoUrl || photos[0]?.thumbnailUrl,
+      notesForCustomer: foundData.notesForCustomer || '',
+    };
+
+    return unifiedGallery;
+  }
+
+  // 6. Fallback to localStorage cache
+  const locals = getLocalCustomerGalleries();
+  const match = locals.find((g) => g.secureToken === cleanId || g.id === cleanId);
+  return match || null;
+}
+
+/**
+ * Real-time listener for client selections on a project/gallery
+ */
+export function subscribeToProjectSelections(
+  projectId: string,
+  callback: (selectedIds: string[]) => void
+): () => void {
+  try {
+    const selectionsRef = collection(db, 'projects', projectId, 'selections');
+    const unsubscribe = onSnapshot(
+      selectionsRef,
+      (snapshot) => {
+        const ids = snapshot.docs.map((d) => d.id);
+        callback(ids);
+      },
+      (err) => {
+        console.warn('Real-time selections subscription notice:', err);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Cannot establish project selections listener:', err);
+    return () => {};
+  }
+}
+
+/**
+ * Batch update photo selections for a project (used by debounced queue)
+ */
+export async function batchUpdateProjectSelections(
+  projectId: string,
+  changes: Map<string, boolean>,
+  allPhotos: CustomerGalleryPhoto[],
+  currentTotalSelected: number
+): Promise<void> {
+  if (changes.size === 0) return;
+
+  const nowIso = new Date().toISOString();
+  const batch = writeBatch(db);
+  const currentUid = auth.currentUser?.uid || 'anonymous_client';
+
+  changes.forEach((isSelected, photoId) => {
+    const projSelRef = doc(db, 'projects', projectId, 'selections', photoId);
+    const galSelRef = doc(db, 'customerGalleries', projectId, 'selections', photoId);
+
+    if (isSelected) {
+      const photo = allPhotos.find((p) => p.id === photoId);
+      const data = {
+        photoId,
+        fileName: photo?.name || photoId,
+        driveFileId: photo?.driveFileId || photoId,
+        selectedBy: currentUid,
+        selectedAt: nowIso,
+      };
+      batch.set(projSelRef, data, { merge: true });
+      batch.set(galSelRef, data, { merge: true });
+    } else {
+      batch.delete(projSelRef);
+      batch.delete(galSelRef);
+    }
+  });
+
+  // Update parent project & gallery selected count and status
+  const projRef = doc(db, 'projects', projectId);
+  const galRef = doc(db, 'customerGalleries', projectId);
+  const statusUpdate = currentTotalSelected > 0 ? 'selection_in_progress' : 'draft';
+
+  batch.update(projRef, {
+    selectedCount: currentTotalSelected,
+    status: statusUpdate,
+    updatedAt: nowIso,
+  });
+
+  batch.set(
+    galRef,
+    {
+      selectedCount: currentTotalSelected,
+      status: statusUpdate,
+      updatedAt: nowIso,
+      lastActivity: 'Selection auto-saved',
+    },
+    { merge: true }
+  );
+
+  await batch.commit();
+}
+
+/**
+ * Clear All Selections & Start Again:
+ * Deletes all selection documents in Firestore, sets selectedCount to 0, returns status to 'draft'.
+ * Keeps project and photos active!
+ */
+export async function clearAllProjectSelections(
+  projectId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const nowIso = new Date().toISOString();
+
+    // 1. Fetch all docs in projects/{projectId}/selections
+    const projSelRef = collection(db, 'projects', projectId, 'selections');
+    const galSelRef = collection(db, 'customerGalleries', projectId, 'selections');
+
+    const [projSnap, galSnap] = await Promise.all([
+      getDocs(projSelRef).catch(() => null),
+      getDocs(galSelRef).catch(() => null),
+    ]);
+
+    const batch = writeBatch(db);
+
+    if (projSnap) {
+      projSnap.forEach((d) => batch.delete(d.ref));
+    }
+    if (galSnap) {
+      galSnap.forEach((d) => batch.delete(d.ref));
+    }
+
+    // Reset status to draft, selectedCount to 0, clear submittedAt
+    const projDoc = doc(db, 'projects', projectId);
+    const galDoc = doc(db, 'customerGalleries', projectId);
+
+    batch.set(
+      projDoc,
+      {
+        selectedCount: 0,
+        status: 'draft',
+        submittedAt: null,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+
+    batch.set(
+      galDoc,
+      {
+        selectedCount: 0,
+        selectedPhotoIds: [],
+        selections: [],
+        status: 'draft',
+        submittedAt: null,
+        updatedAt: nowIso,
+        lastActivity: 'Selections cleared by client',
+      },
+      { merge: true }
+    );
+
+    await batch.commit();
+
+    // Also update local cache
+    const locals = getLocalCustomerGalleries();
+    const idx = locals.findIndex((g) => g.id === projectId);
+    if (idx >= 0) {
+      locals[idx] = {
+        ...locals[idx],
+        selectedCount: 0,
+        selectedPhotoIds: [],
+        selections: [],
+        status: 'draft',
+        submittedAt: undefined,
+        updatedAt: nowIso,
+      };
+      saveLocalCustomerGalleries(locals);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error clearing selections:', err);
+    return { success: false, error: err.message || 'Failed to clear selections' };
+  }
+}
+
+/**
+ * Edit Current Selection:
+ * Returns status to 'draft' while keeping all existing selections intact.
+ */
+export async function editCurrentSelection(projectId: string): Promise<boolean> {
+  try {
+    const nowIso = new Date().toISOString();
+    const projRef = doc(db, 'projects', projectId);
+    const galRef = doc(db, 'customerGalleries', projectId);
+
+    await Promise.all([
+      setDoc(projRef, { status: 'draft', updatedAt: nowIso }, { merge: true }),
+      setDoc(galRef, { status: 'active', updatedAt: nowIso }, { merge: true }),
+    ]);
+
+    const locals = getLocalCustomerGalleries();
+    const idx = locals.findIndex((g) => g.id === projectId);
+    if (idx >= 0) {
+      locals[idx].status = 'active';
+      locals[idx].updatedAt = nowIso;
+      saveLocalCustomerGalleries(locals);
+    }
+    return true;
+  } catch (err) {
+    console.warn('Error changing status back to draft for editing:', err);
+    return false;
+  }
+}
+
+/**
+ * Submit Final Selection:
+ * Sets status to 'submitted', writes submittedAt = now, sets notes for photographer.
+ */
+export async function submitProjectSelection(
+  projectId: string,
+  selectedPhotoIds: string[],
+  customerNotes?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const nowIso = new Date().toISOString();
+    const projRef = doc(db, 'projects', projectId);
+    const galRef = doc(db, 'customerGalleries', projectId);
+
+    // Timeout guard so the UI never hangs indefinitely
+    const commitPromise = Promise.all([
+      setDoc(
+        projRef,
+        {
+          status: 'submitted',
+          submittedAt: nowIso,
+          updatedAt: nowIso,
+          selectedCount: selectedPhotoIds.length,
+          clientNotes: customerNotes || '',
+        },
+        { merge: true }
+      ),
+      setDoc(
+        galRef,
+        {
+          status: 'submitted',
+          submittedAt: nowIso,
+          updatedAt: nowIso,
+          selectedCount: selectedPhotoIds.length,
+          selectedPhotoIds,
+          notesForCustomer: customerNotes || '',
+          lastActivity: 'Selection submitted by client',
+        },
+        { merge: true }
+      ),
+    ]);
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Submission write timeout')), 6000)
+    );
+
+    await Promise.race([commitPromise, timeoutPromise]).catch((e) => {
+      console.warn('Online commit note (will sync locally):', e);
+    });
+
+    // Update local cache
+    const locals = getLocalCustomerGalleries();
+    const idx = locals.findIndex((g) => g.id === projectId);
+    if (idx >= 0) {
+      locals[idx] = {
+        ...locals[idx],
+        status: 'submitted',
+        submittedAt: nowIso,
+        selectedCount: selectedPhotoIds.length,
+        selectedPhotoIds,
+        updatedAt: nowIso,
+      };
+      saveLocalCustomerGalleries(locals);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error submitting selection:', err);
+    return { success: false, error: err.message || 'Submission failed' };
+  }
+}
+
+/**
+ * Customer updates photo selections (legacy method wrapper)
  */
 export async function updateCustomerSelections(
   token: string,
@@ -297,97 +753,45 @@ export async function updateCustomerSelections(
   customerNotes?: string
 ): Promise<{ success: boolean; gallery?: CustomerGallery; error?: string }> {
   try {
-    let gallery = await getCustomerGalleryByToken(token);
+    const gallery = await getCustomerGalleryByToken(token);
     if (!gallery) {
       return { success: false, error: 'Gallery not found' };
     }
 
-    // Check expiration
-    if (gallery.selectionDeadline) {
-      const deadlineDate = new Date(gallery.selectionDeadline);
-      // End of deadline day
-      deadlineDate.setHours(23, 59, 59, 999);
-      if (Date.now() > deadlineDate.getTime()) {
-        return { success: false, error: 'This gallery has expired. Please contact your photographer.' };
-      }
+    if (submitted) {
+      await submitProjectSelection(gallery.id, selectedPhotoIds, customerNotes);
+      gallery.status = 'submitted';
+      gallery.submittedAt = new Date().toISOString();
+    } else {
+      const changes = new Map<string, boolean>();
+      selectedPhotoIds.forEach((pid) => changes.set(pid, true));
+      await batchUpdateProjectSelections(gallery.id, changes, gallery.photos || [], selectedPhotoIds.length);
+      gallery.status = selectedPhotoIds.length > 0 ? 'selection_in_progress' : 'draft';
     }
 
-    // Check status
-    if (gallery.status === 'disabled') {
-      return { success: false, error: 'This gallery is currently unavailable.' };
-    }
-
-    if (gallery.status === 'locked' || (gallery.status === 'submitted' && !gallery.allowEditing)) {
-      return { success: false, error: 'Your photo selection has already been submitted and locked.' };
-    }
-
-    // Check limit
-    if (gallery.maxSelections > 0 && selectedPhotoIds.length > gallery.maxSelections) {
-      return {
-        success: false,
-        error: `You can select a maximum of ${gallery.maxSelections} photos.`,
-      };
-    }
-
-    const nowIso = new Date().toISOString();
-    const newStatus: CustomerGalleryStatus = submitted
-      ? 'submitted'
-      : selectedPhotoIds.length > 0
-      ? 'selection_in_progress'
-      : gallery.status === 'submitted'
-      ? 'submitted'
-      : 'active';
-
-    // Map photo selections
-    const selections: CustomerPhotoSelection[] = selectedPhotoIds.map((pid, idx) => {
-      const matchedPhoto = gallery?.photos?.find((p) => p.id === pid);
-      return {
-        photoId: pid,
-        driveFileId: matchedPhoto?.driveFileId || pid,
-        fileName: matchedPhoto?.name || `Photo_${idx + 1}`,
-        thumbnailUrl: matchedPhoto?.thumbnailUrl,
-        selectedAt: nowIso,
-        selectionOrder: idx + 1,
-      };
-    });
-
-    const updatedGallery: CustomerGallery = {
-      ...gallery,
-      selectedPhotoIds,
-      selections,
-      selectedCount: selectedPhotoIds.length,
-      status: newStatus,
-      updatedAt: nowIso,
-      submittedAt: submitted ? nowIso : gallery.submittedAt,
-      lastActivity: 'Just now',
-      notesForCustomer: customerNotes ?? gallery.notesForCustomer,
-    };
-
-    // Update locally
-    await saveCustomerGallery(updatedGallery);
-
-    return { success: true, gallery: updatedGallery };
+    gallery.selectedPhotoIds = selectedPhotoIds;
+    gallery.selectedCount = selectedPhotoIds.length;
+    return { success: true, gallery };
   } catch (err: any) {
-    console.error('Error updating customer selections:', err);
-    return { success: false, error: err.message || 'Failed to save selections' };
+    return { success: false, error: err?.message || 'Update failed' };
   }
 }
 
 /**
- * Delete a customer gallery
+ * Delete a customer gallery / project
  */
 export async function deleteCustomerGallery(galleryId: string): Promise<void> {
-  // Delete from local storage
   const locals = getLocalCustomerGalleries();
   const filtered = locals.filter((g) => g.id !== galleryId);
   saveLocalCustomerGalleries(filtered);
 
-  // Delete from Firestore
   try {
-    const docRef = doc(db, 'customerGalleries', galleryId);
-    await deleteDoc(docRef);
+    await Promise.all([
+      deleteDoc(doc(db, 'projects', galleryId)).catch(() => {}),
+      deleteDoc(doc(db, 'customerGalleries', galleryId)).catch(() => {}),
+    ]);
   } catch (err) {
-    console.warn('Firestore deleteCustomerGallery failed:', err);
+    console.warn('Firestore delete failed:', err);
   }
 }
 
@@ -398,65 +802,101 @@ export async function updateCustomerGalleryStatus(
   galleryId: string,
   status: CustomerGalleryStatus
 ): Promise<void> {
+  const nowIso = new Date().toISOString();
   const locals = getLocalCustomerGalleries();
-  const gallery = locals.find((g) => g.id === galleryId);
-  if (!gallery) return;
+  const idx = locals.findIndex((g) => g.id === galleryId);
+  if (idx >= 0) {
+    locals[idx].status = status;
+    locals[idx].updatedAt = nowIso;
+    saveLocalCustomerGalleries(locals);
+  }
 
-  const updated: CustomerGallery = {
-    ...gallery,
-    status,
-    updatedAt: new Date().toISOString(),
-  };
-  await saveCustomerGallery(updated);
+  try {
+    await Promise.all([
+      setDoc(doc(db, 'projects', galleryId), { status, updatedAt: nowIso }, { merge: true }),
+      setDoc(doc(db, 'customerGalleries', galleryId), { status, updatedAt: nowIso }, { merge: true }),
+    ]);
+  } catch (err) {
+    console.warn('Status update Firestore note:', err);
+  }
 }
 
 /**
  * Reset selections for a gallery
  */
 export async function resetCustomerSelections(galleryId: string): Promise<void> {
-  const locals = getLocalCustomerGalleries();
-  const gallery = locals.find((g) => g.id === galleryId);
-  if (!gallery) return;
-
-  const updated: CustomerGallery = {
-    ...gallery,
-    selectedPhotoIds: [],
-    selections: [],
-    selectedCount: 0,
-    status: 'active',
-    submittedAt: undefined,
-    updatedAt: new Date().toISOString(),
-    lastActivity: 'Selections reset by photographer',
-  };
-  await saveCustomerGallery(updated);
+  await clearAllProjectSelections(galleryId);
 }
 
 /**
  * Real-time listener for customer galleries in Admin dashboard
+ * Combines projects and customerGalleries collections
  */
 export function subscribeToCustomerGalleries(
   callback: (galleries: CustomerGallery[]) => void
 ): () => void {
   try {
-    const collRef = collection(db, 'customerGalleries');
+    const collRef = collection(db, 'projects');
     const unsubscribe = onSnapshot(
       collRef,
       (snapshot) => {
         if (!snapshot.empty) {
           const list: CustomerGallery[] = [];
           snapshot.forEach((d) => {
-            list.push({ id: d.id, ...(d.data() as Omit<CustomerGallery, 'id'>) });
+            const data = d.data();
+            list.push({
+              id: d.id,
+              ownerUid: data.adminUid,
+              customerName: data.clientName || 'Client',
+              customerEmail: data.clientEmail,
+              customerPhone: data.clientPhone,
+              eventName: data.eventName || 'Event',
+              galleryName: data.galleryName || 'Gallery',
+              driveFolderId: data.driveFolderId || '',
+              driveFolderName: data.driveFolderName || '',
+              secureToken: data.secureToken || d.id,
+              pinEnabled: !!data.pinEnabled,
+              maxSelections: data.maxSelections || 100,
+              selectionDeadline: data.selectionDeadline || '',
+              allowDownloads: data.allowDownloads !== false,
+              allowEditing: data.allowEditing !== false,
+              status: (data.status || 'draft') as CustomerGalleryStatus,
+              totalPhotos: data.totalPhotos || 0,
+              selectedCount: data.selectedCount || 0,
+              createdAt: data.createdAt || new Date().toISOString(),
+              updatedAt: data.updatedAt || new Date().toISOString(),
+              submittedAt: data.submittedAt || undefined,
+              coverPhotoUrl: data.coverPhotoUrl,
+              notesForCustomer: data.notesForCustomer,
+            });
           });
-          // Sort newest first
-          list.sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
+
+          list.sort(
+            (a, b) =>
+              new Date(b.updatedAt || b.createdAt).getTime() -
+              new Date(a.updatedAt || a.createdAt).getTime()
+          );
+
           saveLocalCustomerGalleries(list);
           callback(list);
         } else {
-          callback(getLocalCustomerGalleries());
+          // Fallback to customerGalleries if projects collection empty
+          const fallbackRef = collection(db, 'customerGalleries');
+          getDocs(fallbackRef)
+            .then((snap) => {
+              if (!snap.empty) {
+                const legacyList: CustomerGallery[] = [];
+                snap.forEach((d) => legacyList.push({ id: d.id, ...(d.data() as any) }));
+                callback(legacyList);
+              } else {
+                callback(getLocalCustomerGalleries());
+              }
+            })
+            .catch(() => callback(getLocalCustomerGalleries()));
         }
       },
       (err) => {
-        console.warn('Firestore customerGalleries subscription fallback to local:', err);
+        console.warn('Firestore projects subscription fallback to local:', err);
         callback(getLocalCustomerGalleries());
       }
     );
@@ -497,8 +937,11 @@ export function getRelativeTimeFormatted(dateStr?: string): string {
  * Export selected photo filenames to TXT
  */
 export function exportSelectedFilenamesToTxt(gallery: CustomerGallery): void {
-  const filenames = (gallery.selections || [])
-    .map((s, idx) => s.fileName || `Photo_${idx + 1}`)
+  const filenames = (gallery.selectedPhotoIds || [])
+    .map((pid, idx) => {
+      const match = gallery.photos?.find((p) => p.id === pid);
+      return match?.name || `Photo_${idx + 1}`;
+    })
     .join('\n');
 
   const blob = new Blob([filenames], { type: 'text/plain;charset=utf-8' });
@@ -513,12 +956,15 @@ export function exportSelectedFilenamesToTxt(gallery: CustomerGallery): void {
 }
 
 /**
- * Export selected photos to CSV (selection_order,file_name,file_id)
+ * Export selected photos to CSV
  */
 export function exportSelectedPhotosToCsv(gallery: CustomerGallery): void {
   const headers = 'selection_order,file_name,file_id\n';
-  const rows = (gallery.selections || [])
-    .map((s, idx) => `${s.selectionOrder || idx + 1},"${(s.fileName || '').replace(/"/g, '""')}","${s.driveFileId || s.photoId}"`)
+  const rows = (gallery.selectedPhotoIds || [])
+    .map((pid, idx) => {
+      const match = gallery.photos?.find((p) => p.id === pid);
+      return `${idx + 1},"${(match?.name || `Photo_${idx + 1}`).replace(/"/g, '""')}","${match?.driveFileId || pid}"`;
+    })
     .join('\n');
 
   const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8' });
@@ -537,9 +983,11 @@ export function exportSelectedPhotosToCsv(gallery: CustomerGallery): void {
  */
 export async function copySelectedFilenamesToClipboard(gallery: CustomerGallery): Promise<boolean> {
   try {
-    const text = (gallery.selections || [])
-      .map((s) => s.fileName)
-      .filter(Boolean)
+    const text = (gallery.selectedPhotoIds || [])
+      .map((pid) => {
+        const match = gallery.photos?.find((p) => p.id === pid);
+        return match?.name || pid;
+      })
       .join('\n');
     await navigator.clipboard.writeText(text);
     return true;
@@ -548,3 +996,284 @@ export async function copySelectedFilenamesToClipboard(gallery: CustomerGallery)
     return false;
   }
 }
+
+/**
+ * Request high-resolution ZIP archive for a project / customer gallery
+ * Updates Firestore project status and notifies Admin
+ */
+export async function requestProjectZip(
+  projectId: string,
+  requestData: {
+    clientEmail?: string;
+    clientPhone?: string;
+    notes?: string;
+    selectedCount: number;
+    selectedPhotoIds: string[];
+  }
+): Promise<{ success: boolean; error?: string }> {
+  const nowIso = new Date().toISOString();
+  const updatePayload = {
+    zipRequested: true,
+    zipRequestedAt: nowIso,
+    zipRequestStatus: 'pending',
+    zipRequestNotes: requestData.notes || '',
+    zipRequestEmail: requestData.clientEmail || '',
+    zipRequestPhone: requestData.clientPhone || '',
+    zipRequestedCount: requestData.selectedCount,
+    updatedAt: nowIso,
+    lastActivity: 'Requested High-Res ZIP',
+  };
+
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    await updateDoc(projectRef, {
+      ...updatePayload,
+      updatedAtServer: serverTimestamp(),
+    });
+
+    try {
+      const legacyRef = doc(db, 'customerGalleries', projectId);
+      await updateDoc(legacyRef, updatePayload);
+    } catch {}
+  } catch (err: any) {
+    console.warn('requestProjectZip Firestore notice, updating local storage cache:', err);
+  }
+
+  // Update local storage cache
+  const localGalleries = getLocalCustomerGalleries();
+  const idx = localGalleries.findIndex((g) => g.id === projectId || g.secureToken === projectId);
+  if (idx !== -1) {
+    localGalleries[idx] = {
+      ...localGalleries[idx],
+      ...updatePayload,
+      zipRequestStatus: 'pending' as const,
+    };
+    saveLocalCustomerGalleries(localGalleries);
+  }
+
+  return { success: true };
+}
+
+/**
+ * Admin fulfills high-resolution ZIP archive by setting the download link or marking completed
+ */
+export async function fulfillProjectZip(
+  projectId: string,
+  zipDownloadUrl: string,
+  adminNotes?: string
+): Promise<{ success: boolean; error?: string }> {
+  const nowIso = new Date().toISOString();
+  const updatePayload = {
+    zipDownloadUrl,
+    zipRequestStatus: 'ready' as const,
+    zipFulfilledAt: nowIso,
+    zipAdminNotes: adminNotes || '',
+    updatedAt: nowIso,
+    lastActivity: 'High-Res ZIP Delivered',
+  };
+
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    await updateDoc(projectRef, {
+      ...updatePayload,
+      updatedAtServer: serverTimestamp(),
+    });
+
+    try {
+      const legacyRef = doc(db, 'customerGalleries', projectId);
+      await updateDoc(legacyRef, updatePayload);
+    } catch {}
+  } catch (err: any) {
+    console.warn('fulfillProjectZip Firestore notice:', err);
+  }
+
+  // Update local storage cache
+  const localGalleries = getLocalCustomerGalleries();
+  const idx = localGalleries.findIndex((g) => g.id === projectId || g.secureToken === projectId);
+  if (idx !== -1) {
+    localGalleries[idx] = {
+      ...localGalleries[idx],
+      ...updatePayload,
+    };
+    saveLocalCustomerGalleries(localGalleries);
+  }
+
+  return { success: true };
+}
+
+/**
+ * Record a historical selection state snapshot in the selection_history subcollection
+ */
+export async function recordSelectionHistoryEntry(
+  projectId: string,
+  entry: Omit<SelectionHistoryEntry, 'id' | 'projectId'>
+): Promise<SelectionHistoryEntry> {
+  const historyColRef = collection(db, 'projects', projectId, 'selection_history');
+  const newDocRef = doc(historyColRef);
+  const nowIso = entry.timestamp || new Date().toISOString();
+
+  const historyData: SelectionHistoryEntry = {
+    ...entry,
+    id: newDocRef.id,
+    projectId,
+    timestamp: nowIso,
+  };
+
+  try {
+    await setDoc(newDocRef, {
+      ...historyData,
+      createdAtServer: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Selection history Firestore write notice (offline fallback):', err);
+  }
+
+  // Also maintain local storage history cache for instant offline access and fast undo/redo
+  try {
+    const key = `rcfoto_history_${projectId}`;
+    const raw = localStorage.getItem(key);
+    const list: SelectionHistoryEntry[] = raw ? JSON.parse(raw) : [];
+    list.unshift(historyData);
+    if (list.length > 50) list.length = 50;
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch {}
+
+  return historyData;
+}
+
+/**
+ * Subscribe in real-time to the selection_history subcollection for a project
+ */
+export function subscribeToSelectionHistory(
+  projectId: string,
+  callback: (entries: SelectionHistoryEntry[]) => void
+): () => void {
+  // Load local cache first for instant render
+  try {
+    const key = `rcfoto_history_${projectId}`;
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      callback(JSON.parse(raw));
+    }
+  } catch {}
+
+  try {
+    const historyColRef = collection(db, 'projects', projectId, 'selection_history');
+    const q = query(historyColRef, orderBy('timestamp', 'desc'), limit(50));
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const list: SelectionHistoryEntry[] = [];
+          snapshot.forEach((d) => {
+            const data = d.data();
+            list.push({
+              id: d.id,
+              projectId,
+              action: (data.action as SelectionHistoryAction) || 'select',
+              description: data.description || '',
+              selectedPhotoIds: data.selectedPhotoIds || [],
+              selectedCount: data.selectedCount || 0,
+              affectedPhotoId: data.affectedPhotoId,
+              affectedPhotoName: data.affectedPhotoName,
+              timestamp: data.timestamp || new Date().toISOString(),
+              sessionId: data.sessionId,
+              clientName: data.clientName,
+            });
+          });
+          callback(list);
+          try {
+            localStorage.setItem(`rcfoto_history_${projectId}`, JSON.stringify(list));
+          } catch {}
+        }
+      },
+      (err) => {
+        console.warn('Selection history subscription notice:', err);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Could not subscribe to selection history:', err);
+    return () => {};
+  }
+}
+
+/**
+ * Restore an exact historical selection state snapshot
+ */
+export async function restoreSelectionSnapshot(
+  projectId: string,
+  targetPhotoIds: string[],
+  galleryPhotos: CustomerGalleryPhoto[],
+  actionReason: string = 'Restored snapshot'
+): Promise<boolean> {
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    const selectionsCol = collection(db, 'projects', projectId, 'selections');
+
+    // 1. Fetch current selection items in Firestore to compute diff
+    const currentSnap = await getDocs(selectionsCol);
+    const currentIds = new Set<string>();
+    currentSnap.forEach((d) => currentIds.add(d.id));
+
+    const targetSet = new Set(targetPhotoIds);
+    const batch = writeBatch(db);
+
+    // Delete items no longer in target snapshot
+    currentSnap.forEach((d) => {
+      if (!targetSet.has(d.id)) {
+        batch.delete(d.ref);
+      }
+    });
+
+    // Add items that are in target snapshot but not currently in selections
+    targetPhotoIds.forEach((pid, idx) => {
+      if (!currentIds.has(pid)) {
+        const photo = galleryPhotos.find((p) => p.id === pid);
+        const selDocRef = doc(selectionsCol, pid);
+        batch.set(selDocRef, {
+          photoId: pid,
+          driveFileId: photo?.driveFileId || pid,
+          fileName: photo?.name || `photo_${pid}`,
+          thumbnailUrl: photo?.thumbnailUrl || '',
+          selectedAt: new Date().toISOString(),
+          selectionOrder: idx + 1,
+        });
+      }
+    });
+
+    // Update main project doc
+    batch.update(projectRef, {
+      selectedCount: targetPhotoIds.length,
+      selectedPhotoIds: targetPhotoIds,
+      updatedAt: new Date().toISOString(),
+      updatedAtServer: serverTimestamp(),
+      lastActivity: actionReason,
+    });
+
+    await batch.commit();
+
+    // Record snapshot restore in history subcollection
+    await recordSelectionHistoryEntry(projectId, {
+      action: 'restore_snapshot',
+      description: `${actionReason} (${targetPhotoIds.length} photos)`,
+      selectedPhotoIds: targetPhotoIds,
+      selectedCount: targetPhotoIds.length,
+      timestamp: new Date().toISOString(),
+    });
+
+    return true;
+  } catch (err) {
+    console.warn('restoreSelectionSnapshot fallback notice:', err);
+    // Still record in history locally
+    await recordSelectionHistoryEntry(projectId, {
+      action: 'restore_snapshot',
+      description: `${actionReason} (${targetPhotoIds.length} photos)`,
+      selectedPhotoIds: targetPhotoIds,
+      selectedCount: targetPhotoIds.length,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
+}
+

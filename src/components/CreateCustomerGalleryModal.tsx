@@ -28,6 +28,8 @@ import {
   generateSecureToken,
   hashPin,
   saveCustomerGallery,
+  generateDriveThumbnailUrl,
+  generateDrivePreviewUrl,
 } from '../services/customerGalleryService';
 import { DriveFolderPickerModal, DriveFolderSelectionResult } from './DriveFolderPickerModal';
 import { listPhotosInFolder } from '../services/drive';
@@ -124,13 +126,13 @@ export const CreateCustomerGalleryModal: React.FC<CreateCustomerGalleryModalProp
         }
       }
 
-      // Convert DrivePhotos to CustomerGalleryPhotos
+      // Convert DrivePhotos to CustomerGalleryPhotos with reliable high-res image URLs
       const mappedPhotos: CustomerGalleryPhoto[] = fetchedPhotos.map((p) => ({
         id: p.id,
         driveFileId: p.id,
         name: p.name,
-        thumbnailUrl: p.thumbnailLink || `https://drive.google.com/thumbnail?id=${p.id}&sz=w800`,
-        previewUrl: p.webViewLink || p.thumbnailLink || `https://drive.google.com/thumbnail?id=${p.id}&sz=w1600`,
+        thumbnailUrl: generateDriveThumbnailUrl(p.id, p.thumbnailLink),
+        previewUrl: generateDrivePreviewUrl(p.id, p.thumbnailLink),
         mimeType: p.mimeType,
         size: p.size ? `${(parseInt(p.size, 10) / (1024 * 1024)).toFixed(1)} MB` : undefined,
         createdTime: p.createdTime,
@@ -189,7 +191,7 @@ export const CreateCustomerGalleryModal: React.FC<CreateCustomerGalleryModalProp
   };
 
   const getShareUrl = (token: string) => {
-    return `${window.location.origin}/select/${token}`;
+    return `${window.location.origin}/gallery/${createdGallery?.id || token}`;
   };
 
   const handleCopyLink = () => {

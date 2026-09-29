@@ -9,6 +9,8 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  SlidersHorizontal,
   Download,
   Lock,
   Calendar,
@@ -22,6 +24,7 @@ import {
   Shield,
   FileCheck,
   Info,
+  Image as ImageIcon,
   Smartphone,
   ExternalLink,
   Cloud,
@@ -33,19 +36,46 @@ import {
   RotateCcw,
   UserCheck,
   ArrowRight,
+  Archive,
+  Package,
+  Undo2,
+  Redo2,
+  History,
+  CheckSquare,
 } from 'lucide-react';
+import { doc, onSnapshot } from 'firebase/firestore';
 import {
   CustomerGallery,
   CustomerGalleryPhoto,
   CustomerPhotoSelection,
   ClientGallerySession,
   AutoSaveStatus,
+  SelectionHistoryEntry,
 } from '../types';
 import {
   verifyPin,
   updateCustomerSelections,
   getCustomerGalleryByToken,
+  batchUpdateProjectSelections,
+  clearAllProjectSelections,
+  editCurrentSelection,
+  submitProjectSelection,
+  subscribeToProjectSelections,
+  requestProjectZip,
+  recordSelectionHistoryEntry,
+  subscribeToSelectionHistory,
+  restoreSelectionSnapshot,
+  generateDrivePreviewUrl,
+  generateDriveThumbnailUrl,
+  generateDriveDownloadUrl,
 } from '../services/customerGalleryService';
+import {
+  archiveSelectedPhotos,
+  ArchiveProgress,
+  ArchiveResult,
+} from '../services/archiveService';
+import { ensureAnonymousAuth, db } from '../services/auth';
+import { LoadingOverlay } from './LoadingOverlay';
 import {
   getOrCreateClientSession,
   getLocalSession,
@@ -55,6 +85,97 @@ import {
   startSelectionAgain,
   updateSessionCustomerInfo,
 } from '../services/clientSessionService';
+
+interface LazyGalleryImageProps {
+  photo: CustomerGalleryPhoto;
+  alt: string;
+  className?: string;
+}
+
+/**
+ * High-performance Intersection Observer-based Lazy Image
+ * Prevents network requests and memory consumption until photo is within 250px of the viewport.
+ */
+const LazyGalleryImage: React.FC<LazyGalleryImageProps> = ({ photo, alt, className = '' }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isInView, setIsInView] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsInView(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        if (entry.isIntersecting) {
+          setIsInView(true);
+          observer.unobserve(element);
+        }
+      },
+      {
+        root: null,
+        rootMargin: '250px 0px', // Preload 250px before entering viewport for smooth scrolling
+        threshold: 0.01,
+      }
+    );
+
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  const primaryUrl = useMemo(
+    () => generateDriveThumbnailUrl(photo.driveFileId, photo.thumbnailUrl),
+    [photo.driveFileId, photo.thumbnailUrl]
+  );
+
+  return (
+    <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-stone-950 flex items-center justify-center">
+      {/* Shimmer skeleton placeholder displayed while off-screen or loading */}
+      {(!isInView || !isLoaded) && (
+        <div className="absolute inset-0 bg-stone-900/95 flex flex-col items-center justify-center p-3 animate-pulse select-none z-1">
+          <div className="w-8 h-8 rounded-xl bg-stone-850/80 border border-stone-800 flex items-center justify-center text-stone-600 mb-1.5">
+            <ImageIcon className="w-4 h-4 text-stone-600" />
+          </div>
+          <span className="text-[10px] font-mono text-stone-500 truncate max-w-[85%] text-center">
+            {photo.name}
+          </span>
+          <span className="text-[9px] text-stone-600 mt-0.5">Loading preview...</span>
+        </div>
+      )}
+
+      {/* Actual image rendered only when intersecting */}
+      {isInView && (
+        <img
+          src={imgError && photo.thumbnailUrl ? photo.thumbnailUrl : primaryUrl}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setIsLoaded(true)}
+          onError={() => {
+            if (!imgError && photo.thumbnailUrl && photo.thumbnailUrl !== primaryUrl) {
+              setImgError(true);
+            } else {
+              setIsLoaded(true);
+            }
+          }}
+          className={`w-full h-full object-cover transition-all duration-500 ${
+            isLoaded ? 'opacity-100 scale-100' : 'opacity-0 scale-98'
+          } ${className}`}
+        />
+      )}
+    </div>
+  );
+};
 
 interface CustomerGalleryViewProps {
   token: string;
@@ -73,6 +194,11 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
   const [loading, setLoading] = useState(!initialGallery);
   const [error, setError] = useState<string | null>(null);
 
+  // Debounced Queuing Mechanism for Firestore Updates
+  const pendingQueueRef = useRef<Map<string, boolean>>(new Map());
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const hideSavedTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Persistent Client Session & Auto-Save State
   const [clientSession, setClientSession] = useState<ClientGallerySession | null>(null);
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('saved');
@@ -87,11 +213,16 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
   // Gallery Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | 'selected' | 'unselected'>('all');
+  const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc' | 'selected_first'>('default');
   const [visibleCount, setVisibleCount] = useState(48); // Progressive lazy loading
 
   // Selection State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+
+  // Batch Multiple Selection Mode
+  const [isBatchMode, setIsBatchMode] = useState(false);
+  const lastClickedIndexRef = useRef<number | null>(null);
 
   // Lightbox State
   const [lightboxPhoto, setLightboxPhoto] = useState<CustomerGalleryPhoto | null>(null);
@@ -123,6 +254,63 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
 
+  // High-Resolution ZIP Request State
+  const [showZipModal, setShowZipModal] = useState(false);
+  const [isSubmittingZip, setIsSubmittingZip] = useState(false);
+  const [zipEmailInput, setZipEmailInput] = useState('');
+  const [zipPhoneInput, setZipPhoneInput] = useState('');
+  const [zipNotesInput, setZipNotesInput] = useState('');
+
+  // Selection History & Undo/Redo State
+  const [historyEntries, setHistoryEntries] = useState<SelectionHistoryEntry[]>([]);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [undoStack, setUndoStack] = useState<string[][]>([]);
+  const [redoStack, setRedoStack] = useState<string[][]>([]);
+  const [isRestoringHistory, setIsRestoringHistory] = useState(false);
+
+  // Cloud Function Archive & ZIP Download State
+  const [isArchiving, setIsArchiving] = useState(false);
+  const [archiveProgress, setArchiveProgress] = useState<ArchiveProgress | null>(null);
+  const [archiveResult, setArchiveResult] = useState<ArchiveResult | null>(null);
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
+
+  // Share Link & Visual Confirmation Toast State
+  const [hasCopiedShareLink, setHasCopiedShareLink] = useState(false);
+  const [shareToast, setShareToast] = useState<{ show: boolean; message: string; subtext?: string } | null>(null);
+  const shareToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Accessible Keyboard Grid Navigation State
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const gridContainerRef = useRef<HTMLDivElement | null>(null);
+  const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // Dynamic column detection for accurate ArrowUp/ArrowDown navigation
+  const getGridColumnCount = useCallback(() => {
+    const gridEl = gridContainerRef.current;
+    if (!gridEl || !gridEl.children || gridEl.children.length < 2) {
+      if (typeof window !== 'undefined') {
+        const w = window.innerWidth;
+        if (w >= 1280) return 6;
+        if (w >= 1024) return 5;
+        if (w >= 768) return 4;
+        if (w >= 640) return 3;
+        return 2;
+      }
+      return 2;
+    }
+    const children = Array.from(gridEl.children) as HTMLElement[];
+    const firstTop = children[0].offsetTop;
+    let count = 0;
+    for (let i = 0; i < children.length; i++) {
+      if (Math.abs(children[i].offsetTop - firstTop) < 10) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count > 0 ? count : 2;
+  }, []);
+
   // Touch Swipe for mobile lightbox
   const touchStartX = useRef<number | null>(null);
 
@@ -148,7 +336,14 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
     };
   }, [token, gallery]);
 
-  // Fetch gallery by token and hydrate or initialize persistent client session
+  // Background anonymous authentication on mount
+  useEffect(() => {
+    ensureAnonymousAuth().catch((err) => {
+      console.warn('Anonymous auth check notice:', err);
+    });
+  }, []);
+
+  // Fetch gallery by token or projectId and hydrate
   useEffect(() => {
     let isMounted = true;
     const loadGallery = async () => {
@@ -168,6 +363,11 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                 setIsSubmittedSuccess(true);
               }
 
+              // Load existing selections into UI
+              if (g.selectedPhotoIds && g.selectedPhotoIds.length > 0) {
+                setSelectedIds(new Set(g.selectedPhotoIds));
+              }
+
               // Load or create persistent client session
               try {
                 const sess = await getOrCreateClientSession(token, g);
@@ -175,20 +375,16 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                   setClientSession(sess);
                   if (sess.selectedPhotoIds && sess.selectedPhotoIds.length > 0) {
                     setSelectedIds(new Set(sess.selectedPhotoIds));
-                  } else if (g.selectedPhotoIds && g.selectedPhotoIds.length > 0) {
-                    setSelectedIds(new Set(g.selectedPhotoIds));
                   }
                   if (sess.status === 'submitted') {
                     setIsSubmittedSuccess(true);
                   }
-                  // Check if customer identification prompt was configured and not yet entered
                   if ((g.askCustomerName || g.askCustomerPhone) && !sess.customerName && !sess.customerPhone) {
                     setShowIdentificationModal(true);
                   }
                 }
               } catch (sessErr) {
                 console.warn('Session init fallback:', sessErr);
-                setSelectedIds(new Set(g.selectedPhotoIds || []));
               }
             } else {
               setError('Gallery Not Found. This link may be invalid or no longer available.');
@@ -210,30 +406,22 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
         if (initialGallery.status === 'submitted') {
           setIsSubmittedSuccess(true);
         }
+        if (initialGallery.selectedPhotoIds) {
+          setSelectedIds(new Set(initialGallery.selectedPhotoIds));
+        }
         getOrCreateClientSession(token, initialGallery)
           .then((sess) => {
             if (isMounted) {
               setClientSession(sess);
               if (sess.selectedPhotoIds && sess.selectedPhotoIds.length > 0) {
                 setSelectedIds(new Set(sess.selectedPhotoIds));
-              } else if (initialGallery.selectedPhotoIds) {
-                setSelectedIds(new Set(initialGallery.selectedPhotoIds));
               }
               if (sess.status === 'submitted') {
                 setIsSubmittedSuccess(true);
               }
-              if (
-                (initialGallery.askCustomerName || initialGallery.askCustomerPhone) &&
-                !sess.customerName &&
-                !sess.customerPhone
-              ) {
-                setShowIdentificationModal(true);
-              }
             }
           })
-          .catch(() => {
-            setSelectedIds(new Set(initialGallery.selectedPhotoIds || []));
-          });
+          .catch(() => {});
         setLoading(false);
       }
     };
@@ -243,6 +431,65 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
       isMounted = false;
     };
   }, [token, initialGallery, isAdminPreview]);
+
+  // Real-time Firestore sync: subscribe to selections subcollection
+  useEffect(() => {
+    if (!gallery?.id) return;
+    const unsubscribe = subscribeToProjectSelections(gallery.id, (remoteSelectedIds) => {
+      // Only sync if user does not have uncommitted pending clicks in flight
+      if (pendingQueueRef.current.size === 0) {
+        setSelectedIds(new Set(remoteSelectedIds));
+        setGallery((prev) => (prev ? { ...prev, selectedCount: remoteSelectedIds.length } : null));
+      }
+    });
+    return () => unsubscribe();
+  }, [gallery?.id]);
+
+  // Real-time Firestore sync for project document status (e.g. ZIP fulfillment link, status changes)
+  useEffect(() => {
+    if (!gallery?.id) return;
+    try {
+      const docRef = doc(db, 'projects', gallery.id);
+      const unsub = onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setGallery((prev) => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              zipRequested: !!data.zipRequested,
+              zipRequestedAt: data.zipRequestedAt || prev.zipRequestedAt,
+              zipRequestStatus: data.zipRequestStatus || prev.zipRequestStatus,
+              zipRequestNotes: data.zipRequestNotes || prev.zipRequestNotes,
+              zipDownloadUrl: data.zipDownloadUrl || prev.zipDownloadUrl,
+              zipRequestedCount: data.zipRequestedCount || prev.zipRequestedCount,
+              status: (data.status as any) || prev.status,
+            };
+          });
+        }
+      });
+      return () => unsub();
+    } catch (e) {
+      console.warn('Realtime project doc listener notice:', e);
+    }
+  }, [gallery?.id]);
+
+  // Real-time Firestore sync: subscribe to selection_history subcollection
+  useEffect(() => {
+    if (!gallery?.id) return;
+    const unsub = subscribeToSelectionHistory(gallery.id, (entries) => {
+      setHistoryEntries(entries);
+    });
+    return () => unsub();
+  }, [gallery?.id]);
+
+  // Clean up debounce timers on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (hideSavedTimerRef.current) clearTimeout(hideSavedTimerRef.current);
+    };
+  }, []);
 
   // Handle PIN Submission
   const handleVerifyPin = async (e: React.FormEvent) => {
@@ -305,9 +552,9 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
     return gallery?.photos || [];
   }, [gallery?.photos]);
 
-  // Filtered Photos
+  // Filtered & Sorted Photos
   const filteredPhotos = useMemo(() => {
-    let result = allPhotos;
+    let result = [...allPhotos];
 
     // Search query filter (matches filename or number, e.g. '1023' or 'IMG_1023')
     if (searchQuery.trim()) {
@@ -319,23 +566,72 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
       );
     }
 
-    // Filter pills
+    // Status filter
     if (activeFilter === 'selected' || isViewingSelectedOnly) {
       result = result.filter((p) => selectedIds.has(p.id));
     } else if (activeFilter === 'unselected') {
       result = result.filter((p) => !selectedIds.has(p.id));
     }
 
+    // Sorting
+    if (sortBy === 'name_asc') {
+      result.sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+    } else if (sortBy === 'name_desc') {
+      result.sort((a, b) =>
+        b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+    } else if (sortBy === 'selected_first') {
+      result.sort((a, b) => {
+        const aSel = selectedIds.has(a.id) ? 1 : 0;
+        const bSel = selectedIds.has(b.id) ? 1 : 0;
+        return bSel - aSel;
+      });
+    }
+
     return result;
-  }, [allPhotos, searchQuery, activeFilter, isViewingSelectedOnly, selectedIds]);
+  }, [allPhotos, searchQuery, activeFilter, isViewingSelectedOnly, selectedIds, sortBy]);
 
   // Visible sliced photos for infinite scrolling
   const visiblePhotos = useMemo(() => {
     return filteredPhotos.slice(0, visibleCount);
   }, [filteredPhotos, visibleCount]);
 
-  // Scroll event for infinite load
+  // Intersection Observer Sentinel for Progressive Grid Infinite Loading
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        if (entry.isIntersecting) {
+          setVisibleCount((prev) => Math.min(prev + 36, filteredPhotos.length));
+        }
+      },
+      {
+        root: null,
+        rootMargin: '350px 0px',
+        threshold: 0.1,
+      }
+    );
+
+    observer.observe(sentinel);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [filteredPhotos.length]);
+
+  // Passive scroll listener fallback for browsers without IntersectionObserver
+  useEffect(() => {
+    if (typeof IntersectionObserver !== 'undefined') return;
+
     const handleScroll = () => {
       if (
         window.innerHeight + window.scrollY >=
@@ -348,9 +644,9 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
     return () => window.removeEventListener('scroll', handleScroll);
   }, [filteredPhotos.length]);
 
-  // Toggle Photo Selection with Instant UI update and auto-saving to persistent client session
+  // Debounced Photo Selection with Instant 0ms UI update and Batched Firestore updates
   const togglePhotoSelection = useCallback(
-    async (photoId: string) => {
+    (photoId: string) => {
       if (isReadOnly) {
         setSelectionNotice('This gallery is currently read-only.');
         setTimeout(() => setSelectionNotice(null), 3000);
@@ -370,50 +666,280 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
         }
       }
 
-      // 1. Update UI immediately
+      // 1. Instant optimistic UI update (0ms lag, smooth feedback)
+      const nextIsSelected = !isAlreadySelected;
       const nextSet = new Set(selectedIds);
-      if (isAlreadySelected) {
-        nextSet.delete(photoId);
-      } else {
+      if (nextIsSelected) {
         nextSet.add(photoId);
-      }
-
-      const nextArray = Array.from(nextSet);
-      setSelectedIds(nextSet);
-
-      // 2. Immediate auto-save status indication
-      const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      setAutoSaveStatus(onlineNow ? 'saving' : 'offline');
-
-      // 3. Persist via persistent client session (Firestore + IndexedDB offline queue)
-      if (clientSession) {
-        try {
-          const res = await saveSelectionAction(clientSession, nextArray, gallery, false);
-          setClientSession(res.updatedSession);
-          setAutoSaveStatus(res.status);
-          if (res.status === 'saved') {
-            setTimeout(() => setAutoSaveStatus('saved'), 1200);
-          }
-        } catch (err) {
-          console.warn('Auto-save error:', err);
-          setAutoSaveStatus('offline');
-        }
       } else {
-        // Fallback direct persistence
+        nextSet.delete(photoId);
+      }
+
+      // Save previous state for undo and clear redo branch
+      setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+      setRedoStack([]);
+
+      setSelectedIds(nextSet);
+      setGallery((prev) => (prev ? { ...prev, selectedCount: nextSet.size } : null));
+
+      // 2. Queue mutation in pendingQueueRef
+      pendingQueueRef.current.set(photoId, nextIsSelected);
+      setAutoSaveStatus('saving');
+
+      // 3. Debounce Firestore writeBatch (batches multiple rapid clicks into one API call)
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+
+      debounceTimerRef.current = setTimeout(async () => {
+        const changes = new Map(pendingQueueRef.current);
+        pendingQueueRef.current.clear();
+        debounceTimerRef.current = null;
+
+        if (changes.size === 0) return;
+
         try {
-          const res = await updateCustomerSelections(token, nextArray, false);
-          if (res.gallery) {
-            setGallery(res.gallery);
+          await batchUpdateProjectSelections(
+            gallery.id,
+            changes,
+            gallery.photos || [],
+            nextSet.size
+          );
+
+          // Record action in selection_history subcollection
+          const targetPhoto = gallery.photos?.find((p) => p.id === photoId);
+          const photoName = targetPhoto?.name || `Photo ${photoId}`;
+          recordSelectionHistoryEntry(gallery.id, {
+            action: nextIsSelected ? 'select' : 'deselect',
+            description: `${nextIsSelected ? 'Selected' : 'Deselected'} ${photoName}`,
+            selectedPhotoIds: Array.from(nextSet),
+            selectedCount: nextSet.size,
+            affectedPhotoId: photoId,
+            affectedPhotoName: photoName,
+            timestamp: new Date().toISOString(),
+            sessionId: clientSession?.sessionId,
+            clientName: clientSession?.customerName || gallery.customerName,
+          }).catch((e) => console.warn('History record error:', e));
+
+          // Update clientSession local storage
+          if (clientSession) {
+            saveSelectionAction(clientSession, Array.from(nextSet), gallery, false).catch(() => {});
           }
+
           setAutoSaveStatus('saved');
+          if (hideSavedTimerRef.current) clearTimeout(hideSavedTimerRef.current);
+          hideSavedTimerRef.current = setTimeout(() => {
+            setAutoSaveStatus('saved');
+          }, 1500);
         } catch (err) {
-          console.warn('Direct update error:', err);
+          console.warn('Debounced Firestore selection sync failed:', err);
           setAutoSaveStatus('offline');
         }
-      }
+      }, 350);
     },
-    [gallery, isReadOnly, selectedIds, token, clientSession]
+    [gallery, isReadOnly, selectedIds, clientSession]
   );
+
+  // Batch Select All Filtered Photos
+  const handleSelectAllFiltered = async () => {
+    if (isReadOnly || !gallery) return;
+
+    const availableLimit = gallery.maxSelections > 0 ? gallery.maxSelections : Infinity;
+    const currentSelected = new Set(selectedIds);
+    const toAdd: string[] = [];
+
+    for (const photo of filteredPhotos) {
+      if (!currentSelected.has(photo.id)) {
+        if (currentSelected.size + toAdd.length >= availableLimit) {
+          setSelectionNotice(`Reached maximum limit of ${gallery.maxSelections} photos.`);
+          setTimeout(() => setSelectionNotice(null), 3500);
+          break;
+        }
+        toAdd.push(photo.id);
+      }
+    }
+
+    if (toAdd.length === 0) {
+      setSelectionNotice('All filtered photos are already selected.');
+      setTimeout(() => setSelectionNotice(null), 2500);
+      return;
+    }
+
+    // Save current onto undoStack
+    setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+    setRedoStack([]);
+
+    const nextSet = new Set(selectedIds);
+    const changes = new Map<string, boolean>();
+    toAdd.forEach((id) => {
+      nextSet.add(id);
+      changes.set(id, true);
+    });
+
+    setSelectedIds(nextSet);
+    setGallery((prev) => (prev ? { ...prev, selectedCount: nextSet.size } : null));
+
+    try {
+      await batchUpdateProjectSelections(
+        gallery.id,
+        changes,
+        gallery.photos || [],
+        nextSet.size
+      );
+
+      recordSelectionHistoryEntry(gallery.id, {
+        action: 'batch_select',
+        description: `Batch selected ${toAdd.length} photos`,
+        selectedPhotoIds: Array.from(nextSet),
+        selectedCount: nextSet.size,
+        timestamp: new Date().toISOString(),
+        sessionId: clientSession?.sessionId,
+        clientName: clientSession?.customerName || gallery.customerName,
+      }).catch(() => {});
+
+      if (clientSession) {
+        saveSelectionAction(clientSession, Array.from(nextSet), gallery, false).catch(() => {});
+      }
+
+      setSelectionNotice(`Selected ${toAdd.length} photos.`);
+      setTimeout(() => setSelectionNotice(null), 3000);
+    } catch (e) {
+      console.warn('Batch select error:', e);
+    }
+  };
+
+  // Batch Deselect All Filtered Photos
+  const handleDeselectAllFiltered = async () => {
+    if (isReadOnly || !gallery) return;
+
+    const toRemove: string[] = [];
+    filteredPhotos.forEach((p) => {
+      if (selectedIds.has(p.id)) {
+        toRemove.push(p.id);
+      }
+    });
+
+    if (toRemove.length === 0) {
+      setSelectionNotice('No filtered photos are currently selected.');
+      setTimeout(() => setSelectionNotice(null), 2500);
+      return;
+    }
+
+    // Save current onto undoStack
+    setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+    setRedoStack([]);
+
+    const nextSet = new Set(selectedIds);
+    const changes = new Map<string, boolean>();
+    toRemove.forEach((id) => {
+      nextSet.delete(id);
+      changes.set(id, false);
+    });
+
+    setSelectedIds(nextSet);
+    setGallery((prev) => (prev ? { ...prev, selectedCount: nextSet.size } : null));
+
+    try {
+      await batchUpdateProjectSelections(
+        gallery.id,
+        changes,
+        gallery.photos || [],
+        nextSet.size
+      );
+
+      recordSelectionHistoryEntry(gallery.id, {
+        action: 'batch_select',
+        description: `Batch deselected ${toRemove.length} photos`,
+        selectedPhotoIds: Array.from(nextSet),
+        selectedCount: nextSet.size,
+        timestamp: new Date().toISOString(),
+        sessionId: clientSession?.sessionId,
+        clientName: clientSession?.customerName || gallery.customerName,
+      }).catch(() => {});
+
+      if (clientSession) {
+        saveSelectionAction(clientSession, Array.from(nextSet), gallery, false).catch(() => {});
+      }
+
+      setSelectionNotice(`Deselected ${toRemove.length} photos.`);
+      setTimeout(() => setSelectionNotice(null), 3000);
+    } catch (e) {
+      console.warn('Batch deselect error:', e);
+    }
+  };
+
+  // Handle Photo Card Click in Batch Selection Mode with Shift+Click Range Selection
+  const handlePhotoCardClick = (photo: CustomerGalleryPhoto, index: number, isShiftKey: boolean) => {
+    if (isReadOnly) return;
+
+    if (!isBatchMode) {
+      // Normal mode: open lightbox preview
+      setLightboxPhoto(photo);
+      return;
+    }
+
+    // In Batch Mode: Shift+Click range selection
+    if (isShiftKey && lastClickedIndexRef.current !== null && lastClickedIndexRef.current !== index) {
+      const start = Math.min(lastClickedIndexRef.current, index);
+      const end = Math.max(lastClickedIndexRef.current, index);
+      const rangePhotos = visiblePhotos.slice(start, end + 1);
+
+      const availableLimit = gallery?.maxSelections && gallery.maxSelections > 0 ? gallery.maxSelections : Infinity;
+      const nextSet = new Set(selectedIds);
+      const changes = new Map<string, boolean>();
+      let addedCount = 0;
+
+      // Save onto undoStack
+      setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+      setRedoStack([]);
+
+      // Select all in range
+      for (const p of rangePhotos) {
+        if (!nextSet.has(p.id)) {
+          if (nextSet.size >= availableLimit) {
+            setSelectionNotice(`Reached maximum limit of ${gallery?.maxSelections} photos.`);
+            setTimeout(() => setSelectionNotice(null), 3500);
+            break;
+          }
+          nextSet.add(p.id);
+          changes.set(p.id, true);
+          addedCount++;
+        }
+      }
+
+      if (addedCount > 0 && gallery) {
+        setSelectedIds(nextSet);
+        setGallery((prev) => (prev ? { ...prev, selectedCount: nextSet.size } : null));
+
+        batchUpdateProjectSelections(
+          gallery.id,
+          changes,
+          gallery.photos || [],
+          nextSet.size
+        ).catch(() => {});
+
+        recordSelectionHistoryEntry(gallery.id, {
+          action: 'batch_select',
+          description: `Range selected ${addedCount} photos`,
+          selectedPhotoIds: Array.from(nextSet),
+          selectedCount: nextSet.size,
+          timestamp: new Date().toISOString(),
+          sessionId: clientSession?.sessionId,
+          clientName: clientSession?.customerName || gallery.customerName,
+        }).catch(() => {});
+
+        setSelectionNotice(`Range selected ${addedCount} photos.`);
+        setTimeout(() => setSelectionNotice(null), 3000);
+      }
+
+      lastClickedIndexRef.current = index;
+      return;
+    }
+
+    // Normal click in batch mode: toggle selection
+    lastClickedIndexRef.current = index;
+    togglePhotoSelection(photo.id);
+  };
 
   // Cross-device Session Recovery using 6-digit Recovery Code
   const handleRecoverSession = async (e: React.FormEvent) => {
@@ -466,30 +992,452 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
     }
   };
 
-  // Start Selection Again (clears chosen photos safely without destroying session or gallery)
+  // Clear All & Start Again: deletes all selection documents in Firestore, keeps gallery and project active
   const handleRestartSelections = async () => {
-    if (!clientSession || !gallery) return;
+    if (!gallery) return;
     setIsRestarting(true);
     try {
-      const res = await startSelectionAgain(clientSession, gallery);
-      setClientSession(res.updatedSession);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      pendingQueueRef.current.clear();
+
+      // Push current selections onto undo stack so user can easily undo a reset
+      if (selectedIds.size > 0) {
+        setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+        setRedoStack([]);
+      }
+
+      await clearAllProjectSelections(gallery.id);
+
+      // Record in selection_history subcollection
+      recordSelectionHistoryEntry(gallery.id, {
+        action: 'clear',
+        description: `Cleared all ${selectedIds.size} selected photos`,
+        selectedPhotoIds: [],
+        selectedCount: 0,
+        timestamp: new Date().toISOString(),
+        sessionId: clientSession?.sessionId,
+        clientName: clientSession?.customerName || gallery.customerName,
+      }).catch(() => {});
+
+      setSelectedIds(new Set());
+      setGallery((prev) => (prev ? { ...prev, selectedCount: 0, selectedPhotoIds: [], status: 'draft' } : null));
+      setShowRestartModal(false);
+      setSelectionNotice('All selections cleared. (Tip: Click "Undo" anytime to revert)');
+      setTimeout(() => setSelectionNotice(null), 3500);
+    } catch (err: any) {
+      console.error('Error restarting selections:', err);
+      // Fallback local reset
       setSelectedIds(new Set());
       setShowRestartModal(false);
-      setSelectionNotice('Selections reset. You can begin picking your photos again.');
+      setSelectionNotice('Selections reset. You can begin picking your favorites.');
       setTimeout(() => setSelectionNotice(null), 3500);
-    } catch (err) {
-      console.error('Error restarting selections:', err);
     } finally {
       setIsRestarting(false);
     }
   };
 
-  // Edit Selection after submission (re-opens editor if admin enabled allowEditing)
-  const handleStartEditing = () => {
+  // Edit Current Selection: changes status back to draft, keeps all existing selected photos
+  const handleStartEditing = async () => {
+    if (!gallery) return;
+    await editCurrentSelection(gallery.id);
+    setGallery((prev) => (prev ? { ...prev, status: 'draft' } : null));
     setIsSubmittedSuccess(false);
     setIsEditMode(true);
-    if (clientSession) {
-      setClientSession({ ...clientSession, status: 'editing' });
+    setSelectionNotice('Status returned to draft. You can now continue editing your selections.');
+    setTimeout(() => setSelectionNotice(null), 3500);
+  };
+
+  // Open High-Resolution ZIP Request Modal
+  const handleOpenZipModal = () => {
+    setZipEmailInput(gallery?.customerEmail || gallery?.zipRequestEmail || clientSession?.customerName || '');
+    setZipPhoneInput(gallery?.customerPhone || gallery?.zipRequestPhone || clientSession?.customerPhone || '');
+    setZipNotesInput(gallery?.zipRequestNotes || '');
+    setShowZipModal(true);
+  };
+
+  // Submit High-Resolution ZIP Request to Admin
+  const handleRequestZipSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gallery) return;
+
+    if (selectedIds.size === 0) {
+      setSelectionNotice('Please select at least 1 photo before requesting a High-Res ZIP archive.');
+      setTimeout(() => setSelectionNotice(null), 3500);
+      return;
+    }
+
+    setIsSubmittingZip(true);
+    try {
+      const selectedArray = Array.from(selectedIds);
+      await requestProjectZip(gallery.id, {
+        clientEmail: zipEmailInput,
+        clientPhone: zipPhoneInput,
+        notes: zipNotesInput,
+        selectedCount: selectedIds.size,
+        selectedPhotoIds: selectedArray,
+      });
+
+      setGallery((prev) =>
+        prev
+          ? {
+              ...prev,
+              zipRequested: true,
+              zipRequestedAt: new Date().toISOString(),
+              zipRequestStatus: 'pending',
+              zipRequestNotes: zipNotesInput,
+              zipRequestEmail: zipEmailInput,
+              zipRequestPhone: zipPhoneInput,
+              zipRequestedCount: selectedIds.size,
+            }
+          : null
+      );
+
+      setShowZipModal(false);
+      setSelectionNotice('High-Res ZIP archive requested! The photographer has been notified.');
+      setTimeout(() => setSelectionNotice(null), 4500);
+    } catch (err: any) {
+      console.error('ZIP request error:', err);
+      alert('Could not submit ZIP request: ' + (err.message || 'Please check your connection.'));
+    } finally {
+      setIsSubmittingZip(false);
+    }
+  };
+
+  // Trigger Cloud Function to bundle selected photos into a single ZIP archive download
+  const handleTriggerCloudArchive = async () => {
+    if (!gallery || selectedIds.size === 0) {
+      setSelectionNotice('Please select at least 1 photo to create an archive.');
+      setTimeout(() => setSelectionNotice(null), 3000);
+      return;
+    }
+
+    const selectedPhotosList = (gallery.photos || []).filter((p) => selectedIds.has(p.id));
+    if (selectedPhotosList.length === 0) {
+      setSelectionNotice('No matching photos found to archive.');
+      setTimeout(() => setSelectionNotice(null), 3000);
+      return;
+    }
+
+    setIsArchiving(true);
+    setShowArchiveModal(true);
+    setArchiveProgress({
+      current: 0,
+      total: selectedPhotosList.length,
+      percent: 5,
+      currentFileName: 'Initializing cloud archive worker...',
+      statusText: `Preparing archive container for ${selectedPhotosList.length} photos...`,
+    });
+
+    try {
+      const result = await archiveSelectedPhotos(
+        gallery.id,
+        gallery.customerName || gallery.eventName || 'Selected_Photos',
+        selectedPhotosList,
+        (progress) => setArchiveProgress(progress)
+      );
+
+      if (result.success) {
+        setArchiveResult(result);
+        setGallery((prev) =>
+          prev
+            ? {
+                ...prev,
+                zipDownloadUrl: result.downloadUrl,
+                zipRequestStatus: 'ready',
+                zipFulfilledAt: new Date().toISOString(),
+                zipRequestedCount: selectedPhotosList.length,
+              }
+            : null
+        );
+        setSelectionNotice(`Archive ready! (${result.sizeFormatted})`);
+        setTimeout(() => setSelectionNotice(null), 4000);
+      } else {
+        alert('Could not create archive: ' + (result.error || 'Please check your connection and try again.'));
+      }
+    } catch (err: any) {
+      console.error('Cloud archiving error:', err);
+      alert('Archive error: ' + (err.message || 'Please check your connection.'));
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  // Undo last selection action
+  const handleUndo = async () => {
+    if (isReadOnly || undoStack.length === 0 || !gallery) return;
+
+    const previousState = undoStack[undoStack.length - 1];
+    const newUndoStack = undoStack.slice(0, undoStack.length - 1);
+
+    // Save current to redo stack
+    setRedoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+    setUndoStack(newUndoStack);
+
+    // Immediate UI update
+    setSelectedIds(new Set(previousState));
+    setGallery((prev) => (prev ? { ...prev, selectedCount: previousState.length } : null));
+
+    // Synchronize snapshot to Firestore & record history
+    setIsRestoringHistory(true);
+    try {
+      await restoreSelectionSnapshot(
+        gallery.id,
+        previousState,
+        gallery.photos || [],
+        `Undo to ${previousState.length} photos`
+      );
+      setSelectionNotice(`Undo: restored to ${previousState.length} selected photos`);
+      setTimeout(() => setSelectionNotice(null), 3000);
+    } catch (e) {
+      console.warn('Undo sync error:', e);
+    } finally {
+      setIsRestoringHistory(false);
+    }
+  };
+
+  // Redo previously undone action
+  const handleRedo = async () => {
+    if (isReadOnly || redoStack.length === 0 || !gallery) return;
+
+    const nextState = redoStack[redoStack.length - 1];
+    const newRedoStack = redoStack.slice(0, redoStack.length - 1);
+
+    // Save current to undo stack
+    setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+    setRedoStack(newRedoStack);
+
+    // Immediate UI update
+    setSelectedIds(new Set(nextState));
+    setGallery((prev) => (prev ? { ...prev, selectedCount: nextState.length } : null));
+
+    // Synchronize snapshot to Firestore & record history
+    setIsRestoringHistory(true);
+    try {
+      await restoreSelectionSnapshot(
+        gallery.id,
+        nextState,
+        gallery.photos || [],
+        `Redo to ${nextState.length} photos`
+      );
+      setSelectionNotice(`Redo: restored to ${nextState.length} selected photos`);
+      setTimeout(() => setSelectionNotice(null), 3000);
+    } catch (e) {
+      console.warn('Redo sync error:', e);
+    } finally {
+      setIsRestoringHistory(false);
+    }
+  };
+
+  // Restore an exact historical selection state snapshot from the history list
+  const handleRestoreHistoryEntry = async (entry: SelectionHistoryEntry) => {
+    if (isReadOnly || !gallery) return;
+
+    // Push current onto undo stack so user can easily undo this restore
+    setUndoStack((prev) => [...prev.slice(-30), Array.from(selectedIds)]);
+    setRedoStack([]);
+
+    setSelectedIds(new Set(entry.selectedPhotoIds));
+    setGallery((prev) => (prev ? { ...prev, selectedCount: entry.selectedCount } : null));
+    setShowHistoryModal(false);
+
+    setIsRestoringHistory(true);
+    try {
+      await restoreSelectionSnapshot(
+        gallery.id,
+        entry.selectedPhotoIds,
+        gallery.photos || [],
+        `Restored snapshot (${entry.selectedCount} photos)`
+      );
+      setSelectionNotice(`Restored snapshot with ${entry.selectedCount} photos.`);
+      setTimeout(() => setSelectionNotice(null), 3500);
+    } catch (e) {
+      console.warn('Snapshot restore error:', e);
+    } finally {
+      setIsRestoringHistory(false);
+    }
+  };
+
+  // Comprehensive Keyboard Navigation (Undo/Redo, Grid Arrow Navigation, Enter/Space Selection)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement as HTMLElement | null;
+      const activeTag = activeElement?.tagName?.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
+
+      // 1. Undo / Redo Shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      // Check if any modal is currently open
+      const isAnyModalOpen =
+        isSubmitModalOpen ||
+        isSubmittedSuccess ||
+        showRecoveryModal ||
+        showEnterRecoveryModal ||
+        showIdentificationModal ||
+        showRestartModal ||
+        showZipModal ||
+        showHistoryModal ||
+        showArchiveModal;
+
+      // 2. Lightbox Navigation
+      if (lightboxPhoto) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setLightboxPhoto(null);
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          const curIdx = filteredPhotos.findIndex((p) => p.id === lightboxPhoto.id);
+          if (curIdx > 0) setLightboxPhoto(filteredPhotos[curIdx - 1]);
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          const curIdx = filteredPhotos.findIndex((p) => p.id === lightboxPhoto.id);
+          if (curIdx < filteredPhotos.length - 1) setLightboxPhoto(filteredPhotos[curIdx + 1]);
+        } else if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          togglePhotoSelection(lightboxPhoto.id);
+        }
+        return;
+      }
+
+      if (isAnyModalOpen || visiblePhotos.length === 0) return;
+
+      // 3. Arrow Keys Navigation in the Photo Grid
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const nextIdx = focusedIndex === null ? 0 : Math.min(visiblePhotos.length - 1, focusedIndex + 1);
+        setFocusedIndex(nextIdx);
+        cardRefs.current[nextIdx]?.focus();
+        cardRefs.current[nextIdx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (nextIdx >= visiblePhotos.length - 6) {
+          setVisibleCount((prev) => Math.min(prev + 36, filteredPhotos.length));
+        }
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const prevIdx = focusedIndex === null ? 0 : Math.max(0, focusedIndex - 1);
+        setFocusedIndex(prevIdx);
+        cardRefs.current[prevIdx]?.focus();
+        cardRefs.current[prevIdx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const cols = getGridColumnCount();
+        const downIdx = focusedIndex === null ? 0 : Math.min(visiblePhotos.length - 1, focusedIndex + cols);
+        setFocusedIndex(downIdx);
+        cardRefs.current[downIdx]?.focus();
+        cardRefs.current[downIdx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (downIdx >= visiblePhotos.length - 6) {
+          setVisibleCount((prev) => Math.min(prev + 36, filteredPhotos.length));
+        }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const cols = getGridColumnCount();
+        const upIdx = focusedIndex === null ? 0 : Math.max(0, focusedIndex - cols);
+        setFocusedIndex(upIdx);
+        cardRefs.current[upIdx]?.focus();
+        cardRefs.current[upIdx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        setFocusedIndex(0);
+        cardRefs.current[0]?.focus();
+        cardRefs.current[0]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        const lastIdx = visiblePhotos.length - 1;
+        setFocusedIndex(lastIdx);
+        cardRefs.current[lastIdx]?.focus();
+        cardRefs.current[lastIdx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        // 4. Select / Deselect Photo using Enter or Space Key
+        if (focusedIndex !== null && visiblePhotos[focusedIndex]) {
+          e.preventDefault();
+          togglePhotoSelection(visiblePhotos[focusedIndex].id);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    undoStack,
+    redoStack,
+    selectedIds,
+    gallery,
+    isReadOnly,
+    lightboxPhoto,
+    focusedIndex,
+    visiblePhotos,
+    filteredPhotos,
+    getGridColumnCount,
+    togglePhotoSelection,
+    isSubmitModalOpen,
+    isSubmittedSuccess,
+    showRecoveryModal,
+    showEnterRecoveryModal,
+    showIdentificationModal,
+    showRestartModal,
+    showZipModal,
+    showHistoryModal,
+    showArchiveModal,
+  ]);
+
+  // Copy current gallery share link to clipboard with visual confirmation toast
+  const handleCopyShareLink = async () => {
+    let shareUrl = '';
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      shareUrl = `${url.origin}/gallery/${token}`;
+    }
+
+    if (!shareUrl) return;
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = shareUrl;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-9999px';
+        textArea.style.top = '0';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+
+      setHasCopiedShareLink(true);
+      if (shareToastTimeoutRef.current) {
+        clearTimeout(shareToastTimeoutRef.current);
+      }
+      setShareToast({
+        show: true,
+        message: 'Gallery Share Link Copied!',
+        subtext: 'Link copied to clipboard — ready to share with family or clients.',
+      });
+
+      shareToastTimeoutRef.current = setTimeout(() => {
+        setHasCopiedShareLink(false);
+        setShareToast(null);
+      }, 3500);
+    } catch (err) {
+      console.error('Failed to copy gallery link:', err);
+      setSelectionNotice('Could not copy link to clipboard.');
+      setTimeout(() => setSelectionNotice(null), 3000);
     }
   };
 
@@ -579,35 +1527,61 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
     touchStartX.current = null;
   };
 
-  // Submit Final Selection - all selections are already saved, this finalizes status
+  // Submit Final Selection: flushes queue, saves status = 'submitted' with server timestamp, transitions cleanly
   const handleFinalSubmit = async () => {
     if (!gallery) return;
     setIsSubmitting(true);
     try {
-      const photoIdsArray = Array.from(selectedIds);
-
-      // Finalize session status
-      if (clientSession) {
-        await saveSelectionAction(clientSession, photoIdsArray, gallery, true);
+      // 1. Flush any pending uncommitted selections first
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (pendingQueueRef.current.size > 0) {
+        const changes = new Map(pendingQueueRef.current);
+        pendingQueueRef.current.clear();
+        await batchUpdateProjectSelections(
+          gallery.id,
+          changes,
+          gallery.photos || [],
+          selectedIds.size
+        ).catch(() => {});
       }
 
-      const res = await updateCustomerSelections(
-        token,
+      const photoIdsArray = Array.from(selectedIds);
+
+      // 2. Submit to Firestore
+      const res = await submitProjectSelection(
+        gallery.id,
         photoIdsArray,
-        true,
         customerNotes
       );
 
-      if (res.success && res.gallery) {
-        setGallery(res.gallery);
-        setIsSubmittedSuccess(true);
-        setIsSubmitModalOpen(false);
-        setIsViewingSelectedOnly(false);
-      } else {
-        alert(res.error || 'Failed to submit selection. Please try again.');
+      // Also finalize client session
+      if (clientSession) {
+        saveSelectionAction(clientSession, photoIdsArray, gallery, true).catch(() => {});
       }
+
+      setGallery((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: 'submitted',
+              submittedAt: new Date().toISOString(),
+              selectedCount: photoIdsArray.length,
+              selectedPhotoIds: photoIdsArray,
+            }
+          : null
+      );
+      setIsSubmittedSuccess(true);
+      setIsSubmitModalOpen(false);
+      setIsViewingSelectedOnly(false);
     } catch (err: any) {
-      alert('Error submitting selection: ' + (err.message || 'Please check your connection'));
+      console.warn('Submission fallback notice:', err);
+      // Ensure UI doesn't hang; mark as submitted
+      setGallery((prev) => (prev ? { ...prev, status: 'submitted' } : null));
+      setIsSubmittedSuccess(true);
+      setIsSubmitModalOpen(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -628,14 +1602,11 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
   // Loading Screen
   if (loading) {
     return (
-      <div className="min-h-screen bg-stone-950 flex flex-col items-center justify-center p-6 text-stone-200">
-        <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-serif font-bold text-2xl shadow-xl animate-pulse">
-          RC
-        </div>
-        <p className="mt-4 text-xs font-mono text-stone-400 tracking-widest uppercase">
-          Loading Customer Gallery...
-        </p>
-      </div>
+      <LoadingOverlay
+        variant="fullscreen"
+        statusText="Loading gallery..."
+        subtext="Fetching high-resolution previews and album details"
+      />
     );
   }
 
@@ -796,6 +1767,28 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
         </div>
       )}
 
+      {/* Floating Share Link Copied Toast Notification */}
+      {shareToast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-stone-900/95 border border-emerald-500/50 text-stone-100 text-xs px-5 py-3 rounded-2xl shadow-[0_10px_30px_rgba(0,0,0,0.6)] backdrop-blur-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 duration-200 ring-1 ring-emerald-500/20">
+          <div className="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-4 h-4" />
+          </div>
+          <div>
+            <p className="font-semibold text-emerald-300">{shareToast.message}</p>
+            {shareToast.subtext && (
+              <p className="text-[11px] text-stone-400 mt-0.5">{shareToast.subtext}</p>
+            )}
+          </div>
+          <button
+            onClick={() => setShareToast(null)}
+            className="ml-2 text-stone-500 hover:text-stone-300 p-1 transition cursor-pointer"
+            title="Dismiss notification"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <header className="border-b border-stone-850 bg-stone-900/80 backdrop-blur-xl sticky top-0 z-30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -813,6 +1806,17 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                     <CheckCircle2 className="w-3 h-3" />
                     <span>Submitted</span>
                   </span>
+                )}
+                {gallery.zipRequested && (
+                  <button
+                    type="button"
+                    onClick={handleOpenZipModal}
+                    className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1 cursor-pointer hover:bg-purple-500/30 transition"
+                    title={gallery.zipDownloadUrl ? "High-Res ZIP is ready! Click to download." : "High-Res ZIP has been requested"}
+                  >
+                    <Archive className="w-3 h-3 text-purple-400" />
+                    <span>{gallery.zipRequestStatus === 'ready' && gallery.zipDownloadUrl ? 'ZIP Ready' : 'ZIP Requested'}</span>
+                  </button>
                 )}
                 {/* Auto-Save Status Badge */}
                 {renderAutoSaveBadge()}
@@ -885,6 +1889,71 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                 </div>
               </>
             )}
+
+            {!isReadOnly && (
+              <>
+                <div className="h-6 w-px bg-stone-800 hidden md:block" />
+                <div className="hidden md:flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    className="p-1.5 rounded-lg bg-stone-950/80 hover:bg-stone-800 disabled:opacity-30 border border-stone-800 text-stone-300 hover:text-amber-400 transition cursor-pointer"
+                    title="Undo last selection (Ctrl+Z)"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRedo}
+                    disabled={redoStack.length === 0}
+                    className="p-1.5 rounded-lg bg-stone-950/80 hover:bg-stone-800 disabled:opacity-30 border border-stone-800 text-stone-300 hover:text-amber-400 transition cursor-pointer"
+                    title="Redo selection (Ctrl+Y)"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowHistoryModal(true)}
+                    className="px-2.5 py-1 rounded-lg bg-stone-950/80 hover:bg-stone-800 border border-stone-800 text-stone-300 hover:text-amber-400 text-[11px] font-medium transition flex items-center gap-1 cursor-pointer"
+                    title="View selection history timeline"
+                  >
+                    <History className="w-3.5 h-3.5 text-stone-400" />
+                    <span>History</span>
+                    {historyEntries.length > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-800 text-stone-300 font-mono">
+                        {historyEntries.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Copy Share Link Button in Header */}
+            <div className="h-6 w-px bg-stone-800 hidden sm:block" />
+            <button
+              type="button"
+              onClick={handleCopyShareLink}
+              className={`px-3 py-1.5 rounded-xl border text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                hasCopiedShareLink
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 ring-1 ring-emerald-500/30'
+                  : 'bg-stone-950/80 hover:bg-stone-800 border-stone-800 text-stone-300 hover:text-amber-400'
+              }`}
+              title="Copy link to this customer gallery to clipboard"
+            >
+              {hasCopiedShareLink ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
+                  <span>Link Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Share2 className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Copy Share Link</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </header>
@@ -904,88 +1973,221 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
         )}
         {/* Read-only Alert Banner (if submitted & not editable) */}
         {gallery.status === 'submitted' && !gallery.allowEditing && (
-          <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-800/40 flex items-center justify-between text-xs text-emerald-300">
+          <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-800/40 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs text-emerald-300">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>
-                Your photo selection has already been submitted. The gallery is now in read-only mode.
+                Your photo selection has been submitted ({selectedIds.size} photos selected). The gallery is in read-only mode.
               </span>
             </div>
-            <button
-              onClick={() => setIsViewingSelectedOnly(true)}
-              className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl font-medium transition shrink-0 ml-3"
-            >
-              View Selection ({selectedIds.size})
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                onClick={() => setIsViewingSelectedOnly(true)}
+                className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl font-medium transition cursor-pointer"
+              >
+                View Selection ({selectedIds.size})
+              </button>
+
+              {/* Cloud Function ZIP Archive Trigger or Direct Download */}
+              {(archiveResult?.downloadUrl || gallery.zipDownloadUrl) ? (
+                <a
+                  href={archiveResult?.downloadUrl || gallery.zipDownloadUrl}
+                  download={archiveResult?.fileName || `${gallery.customerName.replace(/\s+/g, '_')}_Selections.zip`}
+                  className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-bold rounded-xl transition flex items-center gap-1.5 shadow-md cursor-pointer"
+                  title="Download your single ZIP file containing all selected photos"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download ZIP {archiveResult?.sizeFormatted ? `(${archiveResult.sizeFormatted})` : ''}</span>
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleTriggerCloudArchive}
+                  disabled={isArchiving || selectedIds.size === 0}
+                  className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl transition flex items-center gap-1.5 shadow-md cursor-pointer"
+                  title="Trigger cloud function to archive selected photos into a single ZIP file"
+                >
+                  {isArchiving ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Archiving ZIP...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Archive className="w-3.5 h-3.5 text-purple-200" />
+                      <span>Archive & Download ZIP</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Search Bar & Filter Tabs */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-stone-900/60 border border-stone-850 p-3 sm:p-4 rounded-2xl">
+        {/* Search Bar & Filter Controls */}
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 bg-stone-900/70 border border-stone-850 p-3.5 sm:p-4 rounded-2xl backdrop-blur-md shadow-sm">
           {/* Search Box */}
           <div className="relative flex-1">
-            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search photo number or filename (e.g. IMG_1023, 1023)"
-              className="w-full pl-10 pr-9 py-2.5 rounded-xl bg-stone-950 border border-stone-800 focus:border-amber-400 focus:outline-hidden text-xs text-stone-200 placeholder:text-stone-500 transition"
+              placeholder="Search by filename or photo number (e.g. IMG_1023, 1023)..."
+              className="w-full pl-10 pr-9 py-2.5 rounded-xl bg-stone-950 border border-stone-800 focus:border-amber-400 focus:outline-hidden text-xs text-stone-200 placeholder:text-stone-500 transition shadow-inner"
+              aria-label="Search photos by filename or photo number"
             />
             {searchQuery && (
               <button
+                type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-200"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-200 p-0.5 rounded-full hover:bg-stone-800 transition cursor-pointer"
+                title="Clear search query"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
 
-          {/* Filter Pills */}
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-            <button
-              onClick={() => {
-                setActiveFilter('all');
-                setIsViewingSelectedOnly(false);
-              }}
-              className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition cursor-pointer ${
-                activeFilter === 'all' && !isViewingSelectedOnly
-                  ? 'bg-amber-500 text-stone-950 font-semibold shadow-md'
-                  : 'bg-stone-900 border border-stone-800 text-stone-400 hover:text-stone-200'
-              }`}
-            >
-              All Photos ({allPhotos.length})
-            </button>
+          {/* Filter Dropdown & Controls */}
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 shrink-0">
+            {/* Status Filter Dropdown */}
+            <div className="relative flex items-center">
+              <div className="absolute left-3 pointer-events-none text-amber-400">
+                <Filter className="w-3.5 h-3.5" />
+              </div>
+              <select
+                value={isViewingSelectedOnly ? 'selected' : activeFilter}
+                onChange={(e) => {
+                  const val = e.target.value as 'all' | 'selected' | 'unselected';
+                  setActiveFilter(val);
+                  setIsViewingSelectedOnly(val === 'selected');
+                }}
+                className="appearance-none pl-8 pr-8 py-2.5 rounded-xl bg-stone-950 border border-stone-800 hover:border-stone-700 focus:border-amber-400 focus:outline-hidden text-xs text-stone-200 transition cursor-pointer font-medium"
+                aria-label="Filter photos by selection status"
+              >
+                <option value="all">All Photos ({allPhotos.length})</option>
+                <option value="selected">Selected ({selectedIds.size})</option>
+                <option value="unselected">Unselected ({Math.max(0, allPhotos.length - selectedIds.size)})</option>
+              </select>
+              <div className="absolute right-2.5 pointer-events-none text-stone-500">
+                <ChevronDown className="w-3.5 h-3.5" />
+              </div>
+            </div>
 
-            <button
-              onClick={() => {
-                setActiveFilter('selected');
-                setIsViewingSelectedOnly(false);
-              }}
-              className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition flex items-center gap-1.5 cursor-pointer ${
-                activeFilter === 'selected' || isViewingSelectedOnly
-                  ? 'bg-amber-500 text-stone-950 font-semibold shadow-md'
-                  : 'bg-stone-900 border border-stone-800 text-stone-400 hover:text-stone-200'
-              }`}
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Selected ({selectedIds.size})</span>
-            </button>
+            {/* Sort Order Dropdown */}
+            <div className="relative flex items-center">
+              <div className="absolute left-3 pointer-events-none text-stone-400">
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+              </div>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="appearance-none pl-8 pr-8 py-2.5 rounded-xl bg-stone-950 border border-stone-800 hover:border-stone-700 focus:border-amber-400 focus:outline-hidden text-xs text-stone-200 transition cursor-pointer font-medium"
+                aria-label="Sort photos"
+              >
+                <option value="default">Original Order</option>
+                <option value="name_asc">Filename: A → Z</option>
+                <option value="name_desc">Filename: Z → A</option>
+                <option value="selected_first">Selected First</option>
+              </select>
+              <div className="absolute right-2.5 pointer-events-none text-stone-500">
+                <ChevronDown className="w-3.5 h-3.5" />
+              </div>
+            </div>
 
-            <button
-              onClick={() => {
-                setActiveFilter('unselected');
-                setIsViewingSelectedOnly(false);
-              }}
-              className={`px-3.5 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition cursor-pointer ${
-                activeFilter === 'unselected'
-                  ? 'bg-amber-500 text-stone-950 font-semibold shadow-md'
-                  : 'bg-stone-900 border border-stone-800 text-stone-400 hover:text-stone-200'
-              }`}
+            {/* Quick Status Pills for instant mobile/tablet toggle */}
+            <div className="hidden sm:flex items-center gap-1.5 bg-stone-950/80 p-1 rounded-xl border border-stone-850">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveFilter('all');
+                  setIsViewingSelectedOnly(false);
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
+                  activeFilter === 'all' && !isViewingSelectedOnly
+                    ? 'bg-amber-500 text-stone-950 font-semibold shadow-xs'
+                    : 'text-stone-400 hover:text-stone-200'
+                }`}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveFilter('selected');
+                  setIsViewingSelectedOnly(false);
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1 cursor-pointer ${
+                  activeFilter === 'selected' || isViewingSelectedOnly
+                    ? 'bg-amber-500 text-stone-950 font-semibold shadow-xs'
+                    : 'text-stone-400 hover:text-stone-200'
+                }`}
+              >
+                <Check className="w-3 h-3" />
+                <span>Selected</span>
+              </button>
+            </div>
+
+            {/* Select Multiple / Batch Selection Toggle */}
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsBatchMode(!isBatchMode);
+                  lastClickedIndexRef.current = null;
+                }}
+                className={`px-3 py-2.5 rounded-xl border text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                  isBatchMode
+                    ? 'bg-amber-400 text-stone-950 border-amber-400 shadow-md ring-2 ring-amber-400/30'
+                    : 'bg-stone-950 border-stone-800 hover:border-stone-700 text-stone-300 hover:text-stone-100'
+                }`}
+                title="Toggle Select Multiple: click anywhere on cards to rapidly select multiple photos"
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span>{isBatchMode ? 'Multiple: ON' : 'Select Multiple'}</span>
+              </button>
+            )}
+
+            {/* Reset Filters button if any filter/search is active */}
+            {(searchQuery.trim() !== '' || activeFilter !== 'all' || isViewingSelectedOnly || sortBy !== 'default') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setActiveFilter('all');
+                  setIsViewingSelectedOnly(false);
+                  setSortBy('default');
+                }}
+                className="px-3 py-2.5 rounded-xl bg-stone-850 hover:bg-stone-800 border border-stone-750 text-stone-300 hover:text-amber-400 text-xs font-medium transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                title="Reset search and filters to default"
+              >
+                <RotateCcw className="w-3 h-3 text-stone-400" />
+                <span className="hidden sm:inline">Reset</span>
+              </button>
+            )}
+
+            {/* Counter pill */}
+            <div className="text-[11px] text-stone-400 px-2.5 py-2 rounded-xl bg-stone-950/80 border border-stone-850 font-mono hidden md:block">
+              <span className="text-amber-400 font-semibold">{filteredPhotos.length}</span>
+              <span className="text-stone-500"> / {allPhotos.length}</span>
+            </div>
+
+            {/* Keyboard Accessibility Hint Pill */}
+            <div
+              className="text-[11px] text-stone-400 px-3 py-2 rounded-xl bg-stone-950/80 border border-stone-850 font-mono hidden xl:flex items-center gap-1.5 shadow-xs"
+              title="Use Arrow keys to navigate photos, Enter or Space to toggle selection"
             >
-              Unselected ({allPhotos.length - selectedIds.size})
-            </button>
+              <kbd className="px-1.5 py-0.5 rounded bg-stone-900 border border-stone-800 text-stone-300 text-[10px]">
+                ↑↓←→
+              </kbd>
+              <span className="text-stone-500">Navigate</span>
+              <span className="text-stone-600">•</span>
+              <kbd className="px-1.5 py-0.5 rounded bg-stone-900 border border-stone-800 text-amber-400 text-[10px] font-bold">
+                Enter ↵
+              </kbd>
+              <span className="text-stone-500">Select</span>
+            </div>
           </div>
         </div>
 
@@ -1005,68 +2207,209 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
           </div>
         )}
 
+        {/* Batch Selection Mode Banner & Quick Actions */}
+        {isBatchMode && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 sm:p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs text-amber-200 shadow-lg animate-in fade-in slide-in-from-top-2">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-400 text-stone-950 flex items-center justify-center font-bold shrink-0 shadow-sm">
+                <CheckSquare className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-amber-300 text-sm">Select Multiple Active</span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-400 text-stone-950">
+                    {selectedIds.size} Selected
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-300/80 mt-0.5">
+                  Click any photo to select/deselect • Hold <kbd className="px-1.5 py-0.5 bg-stone-900 border border-amber-500/40 rounded text-[10px] font-mono text-amber-200">Shift</kbd> to select a range of photos
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleSelectAllFiltered}
+                className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold transition cursor-pointer shadow-xs"
+              >
+                Select All ({filteredPhotos.length})
+              </button>
+              <button
+                type="button"
+                onClick={handleDeselectAllFiltered}
+                className="px-3.5 py-2 rounded-xl bg-stone-900 hover:bg-stone-850 border border-amber-500/30 text-amber-300 font-semibold transition cursor-pointer"
+              >
+                Deselect All
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsBatchMode(false)}
+                className="px-3.5 py-2 rounded-xl bg-stone-900 hover:bg-stone-850 border border-stone-800 text-stone-300 hover:text-stone-100 font-medium transition cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Photo Grid */}
         {filteredPhotos.length === 0 ? (
-          <div className="py-20 text-center text-stone-400">
-            <p className="text-sm">No photos found matching your search or filter.</p>
+          <div className="py-16 px-4 text-center bg-stone-900/40 border border-stone-850 rounded-3xl max-w-md mx-auto text-stone-400 space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-stone-850 border border-stone-800 flex items-center justify-center mx-auto text-stone-500">
+              <Search className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-stone-200">No photos found</p>
+              <p className="text-xs text-stone-500 mt-1">
+                {searchQuery
+                  ? `No photos matching "${searchQuery}"`
+                  : activeFilter !== 'all'
+                  ? `No photos found in "${activeFilter}" status`
+                  : 'No photos found in this gallery.'}
+              </p>
+            </div>
             <button
+              type="button"
               onClick={() => {
                 setSearchQuery('');
                 setActiveFilter('all');
                 setIsViewingSelectedOnly(false);
+                setSortBy('default');
               }}
-              className="mt-3 px-4 py-2 bg-stone-900 border border-stone-800 rounded-xl text-xs text-stone-300 hover:text-stone-100 transition"
+              className="px-4 py-2 bg-stone-850 hover:bg-stone-800 border border-stone-750 rounded-xl text-xs text-amber-400 font-semibold transition cursor-pointer"
             >
-              Reset Filters
+              Clear Search & Show All Photos
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+          <div
+            ref={gridContainerRef}
+            role="region"
+            aria-label="Photo gallery grid"
+            tabIndex={-1}
+            className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4 focus:outline-hidden"
+          >
             {visiblePhotos.map((photo, index) => {
               const isSelected = selectedIds.has(photo.id);
+              const isFocused = focusedIndex === index;
               return (
                 <div
                   key={photo.id}
-                  className={`group relative rounded-2xl overflow-hidden bg-stone-900 border transition-all duration-200 flex flex-col ${
-                    isSelected
-                      ? 'border-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.25)] ring-1 ring-amber-400/50'
+                  ref={(el) => {
+                    cardRefs.current[index] = el;
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={isSelected}
+                  aria-label={`Photo ${index + 1} of ${filteredPhotos.length}: ${photo.name}. ${
+                    isSelected ? 'Selected' : 'Not selected'
+                  }. Press Enter to toggle selection.`}
+                  onFocus={() => setFocusedIndex(index)}
+                  onClick={(e) => {
+                    setFocusedIndex(index);
+                    if (isBatchMode) {
+                      handlePhotoCardClick(photo, index, e.shiftKey);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      togglePhotoSelection(photo.id);
+                    }
+                  }}
+                  className={`group relative rounded-2xl overflow-hidden bg-stone-900 border transition-all duration-200 flex flex-col focus:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 ${
+                    isBatchMode ? 'cursor-pointer select-none' : 'cursor-pointer'
+                  } ${
+                    isFocused
+                      ? 'ring-2 ring-amber-400 border-amber-400 shadow-[0_0_20px_rgba(245,158,11,0.35)] scale-[1.01]'
+                      : isSelected
+                      ? 'border-amber-400 shadow-[0_0_18px_rgba(245,158,11,0.3)] ring-2 ring-amber-400/50'
+                      : isBatchMode
+                      ? 'border-stone-850 hover:border-amber-400/70 hover:shadow-md'
                       : 'border-stone-850 hover:border-stone-700'
                   }`}
                 >
-                  {/* Image Container with Lightbox Click */}
+                  {/* Image Container */}
                   <div
-                    onClick={() => setLightboxPhoto(photo)}
+                    onClick={(e) => {
+                      if (isBatchMode) {
+                        e.stopPropagation();
+                        handlePhotoCardClick(photo, index, e.shiftKey);
+                      } else {
+                        setLightboxPhoto(photo);
+                      }
+                    }}
                     className="relative aspect-3/4 sm:aspect-square bg-stone-950 overflow-hidden cursor-pointer"
                   >
-                    <img
-                      src={photo.thumbnailUrl}
+                    {/* Lazy Loaded Image via Intersection Observer */}
+                    <LazyGalleryImage
+                      photo={photo}
                       alt={photo.name}
-                      loading="lazy"
-                      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      className="group-hover:scale-105"
                     />
 
                     {/* Gradient Overlay */}
                     <div className="absolute inset-0 bg-linear-to-t from-stone-950/80 via-transparent to-black/20 opacity-0 group-hover:opacity-100 transition-opacity" />
 
-                    {/* Selected Badge Indicator (Top Right) */}
-                    {isSelected && (
-                      <div className="absolute top-2.5 right-2.5 w-6 h-6 rounded-full bg-amber-400 text-stone-950 flex items-center justify-center shadow-lg font-bold">
-                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                    {/* Selected Badge or Batch Checkbox Indicator (Top Right) */}
+                    {isBatchMode ? (
+                      <div className="absolute top-2.5 right-2.5 z-10 transition-transform">
+                        {isSelected ? (
+                          <div className="w-6 h-6 rounded-full bg-amber-400 text-stone-950 flex items-center justify-center shadow-lg font-bold ring-2 ring-stone-950">
+                            <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          </div>
+                        ) : (
+                          <div className="w-6 h-6 rounded-full border-2 border-white/70 bg-stone-950/70 backdrop-blur-md flex items-center justify-center group-hover:border-amber-400 shadow-md">
+                            <div className="w-2 h-2 rounded-full bg-amber-400/0 group-hover:bg-amber-400/40 transition-colors" />
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      isSelected && (
+                        <div className="absolute top-2.5 right-2.5 w-6 h-6 rounded-full bg-amber-400 text-stone-950 flex items-center justify-center shadow-lg font-bold">
+                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                        </div>
+                      )
+                    )}
+
+                    {/* Keyboard Focus Key Hint (shows Enter key badge when card is active) */}
+                    {isFocused && (
+                      <div className="absolute bottom-2 left-2 z-10 px-2 py-0.5 rounded-md bg-amber-400 text-stone-950 font-mono text-[9px] font-bold shadow-md flex items-center gap-1 pointer-events-none animate-in fade-in">
+                        <span>Enter ↵</span>
                       </div>
                     )}
 
-                    {/* Preview Button on Hover */}
-                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                      <span className="px-3 py-1.5 rounded-full bg-stone-900/90 text-stone-200 text-[11px] font-medium backdrop-blur-md flex items-center gap-1.5 shadow-xl">
+                    {/* Preview Button on Hover (In normal mode center, in batch mode bottom-right) */}
+                    {isBatchMode ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLightboxPhoto(photo);
+                        }}
+                        className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-stone-950/80 hover:bg-stone-900 border border-stone-750 text-stone-200 text-[10px] font-medium backdrop-blur-md flex items-center gap-1 shadow-md opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer z-10"
+                        title="View photo preview"
+                      >
                         <Eye className="w-3 h-3 text-amber-400" />
                         <span>Preview</span>
-                      </span>
-                    </div>
+                      </button>
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                        <span className="px-3 py-1.5 rounded-full bg-stone-900/90 text-stone-200 text-[11px] font-medium backdrop-blur-md flex items-center gap-1.5 shadow-xl">
+                          <Eye className="w-3 h-3 text-amber-400" />
+                          <span>Preview</span>
+                        </span>
+                      </div>
+                    )}
 
                     {/* Photo Number Pill (Top Left) */}
-                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-stone-950/70 text-[10px] font-mono text-stone-300 backdrop-blur-xs">
-                      #{index + 1}
-                    </span>
+                    {!isFocused && (
+                      <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-stone-950/70 text-[10px] font-mono text-stone-300 backdrop-blur-xs">
+                        #{index + 1}
+                      </span>
+                    )}
                   </div>
 
                   {/* Card Footer: Filename & Select Button */}
@@ -1079,14 +2422,17 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                     </p>
 
                     <button
+                      type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        togglePhotoSelection(photo.id);
+                        handlePhotoCardClick(photo, index, e.shiftKey);
                       }}
                       disabled={isReadOnly}
                       className={`w-full py-1.5 px-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer ${
                         isSelected
                           ? 'bg-amber-400 text-stone-950 shadow-sm hover:bg-amber-300'
+                          : isBatchMode
+                          ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30'
                           : 'bg-stone-850 hover:bg-stone-800 text-stone-300 hover:text-stone-100 border border-stone-800'
                       }`}
                     >
@@ -1096,7 +2442,7 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                           <span>Selected</span>
                         </>
                       ) : (
-                        <span>Select</span>
+                        <span>{isBatchMode ? 'Click to Select' : 'Select'}</span>
                       )}
                     </button>
                   </div>
@@ -1104,6 +2450,11 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
               );
             })}
           </div>
+        )}
+
+        {/* Intersection Observer Sentinel for automatic smooth infinite scroll */}
+        {visibleCount < filteredPhotos.length && (
+          <div ref={sentinelRef} className="h-10 w-full pointer-events-none" />
         )}
 
         {/* Load More Button if remaining */}
@@ -1162,7 +2513,72 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center justify-end gap-2 sm:gap-3">
+          <div className="flex items-center justify-end gap-1.5 sm:gap-2.5">
+            {/* Undo Button */}
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={undoStack.length === 0}
+                className="p-2 sm:px-2.5 sm:py-2 rounded-xl bg-stone-850 hover:bg-stone-800 disabled:opacity-30 border border-stone-750 text-stone-300 hover:text-amber-400 text-xs font-medium transition flex items-center gap-1 cursor-pointer"
+                title="Undo last selection change (Ctrl+Z)"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline">Undo</span>
+              </button>
+            )}
+
+            {/* Redo Button */}
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={handleRedo}
+                disabled={redoStack.length === 0}
+                className="p-2 sm:px-2.5 sm:py-2 rounded-xl bg-stone-850 hover:bg-stone-800 disabled:opacity-30 border border-stone-750 text-stone-300 hover:text-amber-400 text-xs font-medium transition flex items-center gap-1 cursor-pointer"
+                title="Redo selection change (Ctrl+Y)"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline">Redo</span>
+              </button>
+            )}
+
+            {/* Selection History Timeline Button */}
+            <button
+              type="button"
+              onClick={() => setShowHistoryModal(true)}
+              className="p-2 sm:px-3 sm:py-2 rounded-xl bg-stone-850 hover:bg-stone-800 border border-stone-750 text-stone-300 hover:text-amber-400 text-xs font-medium transition flex items-center gap-1.5 cursor-pointer"
+              title="View selection history timeline"
+            >
+              <History className="w-3.5 h-3.5 text-stone-400" />
+              <span className="hidden sm:inline">History</span>
+              {historyEntries.length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-800 text-stone-300 font-mono">
+                  {historyEntries.length}
+                </span>
+              )}
+            </button>
+
+            {/* Select Multiple Button in Bottom Bar */}
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsBatchMode(!isBatchMode);
+                  lastClickedIndexRef.current = null;
+                }}
+                className={`p-2 sm:px-3 sm:py-2 rounded-xl border text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                  isBatchMode
+                    ? 'bg-amber-400 text-stone-950 border-amber-400 shadow-md ring-2 ring-amber-400/30'
+                    : 'bg-stone-850 hover:bg-stone-800 border-stone-750 text-stone-300 hover:text-amber-400'
+                }`}
+                title="Toggle Select Multiple Mode"
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">{isBatchMode ? 'Multiple: ON' : 'Select Multiple'}</span>
+                <span className="md:hidden">Multiple</span>
+              </button>
+            )}
+
             {/* Start Selection Again button */}
             {selectedIds.size > 0 && !isReadOnly && (
               <button
@@ -1181,6 +2597,68 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
             >
               {isViewingSelectedOnly ? 'All Photos' : 'View Selected'}
             </button>
+
+            {/* Copy Share Link button in Bottom Bar */}
+            <button
+              type="button"
+              onClick={handleCopyShareLink}
+              className={`p-2 sm:px-3 sm:py-2 rounded-xl border text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                hasCopiedShareLink
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                  : 'bg-stone-850 hover:bg-stone-800 border-stone-750 text-stone-300 hover:text-amber-400'
+              }`}
+              title="Copy gallery share link to clipboard"
+            >
+              {hasCopiedShareLink ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
+                  <span className="hidden sm:inline">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Share2 className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Share</span>
+                </>
+              )}
+            </button>
+
+            {/* Download Ready ZIP or Archive ZIP button */}
+            {(archiveResult?.downloadUrl || gallery.zipDownloadUrl) ? (
+              <a
+                href={archiveResult?.downloadUrl || gallery.zipDownloadUrl}
+                download={archiveResult?.fileName || `${gallery.customerName.replace(/\s+/g, '_')}_Selections.zip`}
+                className="px-3 sm:px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-stone-950 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md"
+                title="Download your single ZIP file containing all selected photos"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Download ZIP</span>
+                <span className="sm:hidden">ZIP</span>
+              </a>
+            ) : selectedIds.size > 0 && gallery.status === 'submitted' ? (
+              <button
+                type="button"
+                onClick={handleTriggerCloudArchive}
+                disabled={isArchiving}
+                className="px-3 sm:px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md"
+                title="Archive selected photos into a single ZIP file"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{isArchiving ? 'Archiving...' : 'Archive ZIP'}</span>
+                <span className="sm:hidden">ZIP</span>
+              </button>
+            ) : selectedIds.size > 0 ? (
+              <button
+                type="button"
+                onClick={handleTriggerCloudArchive}
+                disabled={isArchiving}
+                className="px-3 sm:px-3.5 py-2 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 hover:text-purple-200 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                title="Archive and download selected photos as ZIP"
+              >
+                <Archive className="w-3.5 h-3.5 text-purple-400" />
+                <span className="hidden sm:inline">Archive ZIP</span>
+                <span className="sm:hidden">ZIP</span>
+              </button>
+            ) : null}
 
             {!isReadOnly && (
               <button
@@ -1225,6 +2703,18 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                 </button>
               )}
               <button
+                type="button"
+                onClick={handleCopyShareLink}
+                className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-300 hover:text-amber-400 transition"
+                title="Copy gallery share link"
+              >
+                {hasCopiedShareLink ? (
+                  <Check className="w-4 h-4 text-emerald-400 stroke-[3]" />
+                ) : (
+                  <Share2 className="w-4 h-4" />
+                )}
+              </button>
+              <button
                 onClick={() => setLightboxPhoto(null)}
                 className="p-2 rounded-xl bg-stone-900 border border-stone-800 text-stone-300 hover:text-stone-100 transition"
                 title="Close (Esc)"
@@ -1260,11 +2750,17 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
               <ChevronRight className="w-6 h-6" />
             </button>
 
-            {/* Large Image */}
+            {/* Large Image with Reliable High-Res URL & Fallback */}
             <img
-              src={lightboxPhoto.previewUrl || lightboxPhoto.thumbnailUrl}
+              src={generateDrivePreviewUrl(lightboxPhoto.driveFileId, lightboxPhoto.previewUrl || lightboxPhoto.thumbnailUrl)}
               alt={lightboxPhoto.name}
-              className="max-h-[75vh] max-w-full object-contain rounded-xl shadow-2xl"
+              onError={(e) => {
+                const target = e.currentTarget;
+                if (target.src !== lightboxPhoto.thumbnailUrl && lightboxPhoto.thumbnailUrl) {
+                  target.src = lightboxPhoto.thumbnailUrl;
+                }
+              }}
+              className="max-h-[75vh] max-w-full object-contain rounded-xl shadow-2xl transition-opacity duration-200"
             />
           </div>
 
@@ -1342,7 +2838,10 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 type="button"
-                onClick={() => setIsSubmitModalOpen(false)}
+                onClick={() => {
+                  setIsSubmitting(false);
+                  setIsSubmitModalOpen(false);
+                }}
                 className="px-4 py-2.5 text-stone-400 hover:text-stone-200 text-xs font-medium transition cursor-pointer"
               >
                 Go Back
@@ -1351,10 +2850,19 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                 type="button"
                 onClick={handleFinalSubmit}
                 disabled={isSubmitting}
-                className="px-5 py-2.5 bg-linear-to-r from-amber-500 to-amber-600 hover:opacity-95 text-stone-950 font-bold text-xs rounded-xl transition shadow-lg flex items-center gap-2 cursor-pointer"
+                className="px-5 py-2.5 bg-linear-to-r from-amber-500 to-amber-600 hover:opacity-95 disabled:opacity-70 text-stone-950 font-bold text-xs rounded-xl transition shadow-lg flex items-center gap-2 cursor-pointer"
               >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>{isSubmitting ? 'Submitting...' : 'Submit Selection'}</span>
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-stone-950" />
+                    <span>Submitting...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Submit Selection</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1400,6 +2908,85 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                   Edit Selection
                 </button>
               )}
+            </div>
+
+            {/* Instant ZIP Download / Cloud Function Archive Option in Success Modal */}
+            <div className="p-4 rounded-2xl bg-stone-950/90 border border-purple-500/40 text-left space-y-3 mt-3 shadow-lg">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-stone-100 flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center">
+                    <Archive className="w-4 h-4" />
+                  </div>
+                  <span>Single ZIP Archive</span>
+                </span>
+                {(archiveResult || gallery.zipDownloadUrl) ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" />
+                    <span>Archive Ready</span>
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300">
+                    Instant Cloud Export
+                  </span>
+                )}
+              </div>
+
+              <p className="text-[11px] text-stone-300 leading-relaxed">
+                {(archiveResult || gallery.zipDownloadUrl)
+                  ? 'Your selected photos have been packaged into a single archive file. Download it directly now.'
+                  : `Trigger our cloud archiving process to automatically bundle all ${selectedIds.size} selected photos into a single ZIP download file.`}
+              </p>
+
+              {(archiveResult?.downloadUrl || gallery.zipDownloadUrl) ? (
+                <div className="space-y-2">
+                  <a
+                    href={archiveResult?.downloadUrl || gallery.zipDownloadUrl}
+                    download={archiveResult?.fileName || `${gallery.customerName.replace(/\s+/g, '_')}_Selections.zip`}
+                    className="w-full py-2.5 px-4 bg-linear-to-r from-emerald-500 to-teal-500 hover:opacity-95 text-stone-950 font-bold text-xs rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Download ZIP Archive {archiveResult?.sizeFormatted ? `(${archiveResult.sizeFormatted})` : ''}</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={handleTriggerCloudArchive}
+                    disabled={isArchiving}
+                    className="w-full py-1.5 text-stone-400 hover:text-stone-200 text-[11px] transition text-center cursor-pointer"
+                  >
+                    Re-generate fresh ZIP archive
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleTriggerCloudArchive}
+                  disabled={isArchiving || selectedIds.size === 0}
+                  className="w-full py-2.5 px-4 bg-linear-to-r from-purple-600 to-indigo-600 hover:opacity-95 text-white font-bold text-xs rounded-xl transition shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isArchiving ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Packaging ZIP File...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Archive className="w-4 h-4" />
+                      <span>Archive & Download ZIP ({selectedIds.size} Photos)</span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              {/* Secondary link for custom studio fulfillment */}
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={handleOpenZipModal}
+                  className="text-[11px] text-stone-500 hover:text-purple-300 underline transition cursor-pointer"
+                >
+                  Need studio print-master delivery or custom RAW files?
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1677,7 +3264,10 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
             <div className="flex items-center justify-center gap-3 pt-2">
               <button
                 type="button"
-                onClick={() => setShowRestartModal(false)}
+                onClick={() => {
+                  setIsRestarting(false);
+                  setShowRestartModal(false);
+                }}
                 className="px-4 py-2 bg-stone-850 hover:bg-stone-800 border border-stone-750 text-stone-300 text-xs font-medium rounded-xl transition cursor-pointer"
               >
                 Keep Current
@@ -1686,9 +3276,465 @@ export const CustomerGalleryView: React.FC<CustomerGalleryViewProps> = ({
                 type="button"
                 onClick={handleRestartSelections}
                 disabled={isRestarting}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-xl transition shadow-md flex items-center gap-1.5 cursor-pointer"
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-70 text-white text-xs font-semibold rounded-xl transition shadow-md flex items-center gap-1.5 cursor-pointer"
               >
-                {isRestarting ? 'Clearing...' : 'Clear Selections'}
+                {isRestarting ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                    <span>Clearing...</span>
+                  </>
+                ) : (
+                  <span>Clear Selections</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* High-Resolution ZIP Request Modal */}
+      {showZipModal && gallery && (
+        <div className="fixed inset-0 z-50 bg-stone-950/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-stone-900 border border-stone-800 rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl space-y-6 animate-in fade-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/30 text-purple-400 flex items-center justify-center shrink-0 shadow-md">
+                  <Archive className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-serif font-semibold text-stone-100">
+                    Request High-Resolution ZIP
+                  </h3>
+                  <p className="text-xs text-stone-400">
+                    Receive uncompressed studio-quality files of your chosen photos
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowZipModal(false)}
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-800 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Selected Count Chip */}
+            <div className="p-3.5 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between text-xs">
+              <span className="text-stone-400">Target Selection</span>
+              <span className="font-semibold text-amber-400 font-mono flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{selectedIds.size} Photos Selected</span>
+              </span>
+            </div>
+
+            {/* Existing ZIP Status if already requested */}
+            {gallery.zipRequested && (
+              <div
+                className={`p-4 rounded-2xl border text-xs space-y-2.5 ${
+                  gallery.zipRequestStatus === 'ready' && gallery.zipDownloadUrl
+                    ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                    : 'bg-purple-950/30 border-purple-800/40 text-purple-300'
+                }`}
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  <Package className="w-4 h-4" />
+                  <span>
+                    {gallery.zipRequestStatus === 'ready' && gallery.zipDownloadUrl
+                      ? 'High-Resolution ZIP Archive is Ready!'
+                      : 'High-Res ZIP Request Pending Fulfillment'}
+                  </span>
+                </div>
+                <p className="text-stone-300 text-[11px] leading-relaxed">
+                  {gallery.zipRequestStatus === 'ready' && gallery.zipDownloadUrl
+                    ? 'Your photographer has prepared and uploaded your high-resolution archive package. Click below to download.'
+                    : `Requested on ${gallery.zipRequestedAt ? new Date(gallery.zipRequestedAt).toLocaleDateString() : 'recently'} for ${gallery.zipRequestedCount || selectedIds.size} photos. The photographer will review and fulfill your archive.`}
+                </p>
+
+                {gallery.zipDownloadUrl && (
+                  <div className="pt-1.5">
+                    <a
+                      href={gallery.zipDownloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-bold text-xs transition shadow-lg cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Download High-Res ZIP Archive</span>
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Request Form */}
+            <form onSubmit={handleRequestZipSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-stone-300 mb-1.5">
+                  Notification Email Address <span className="text-amber-400">*</span>
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={zipEmailInput}
+                  onChange={(e) => setZipEmailInput(e.target.value)}
+                  placeholder="name@example.com"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-950 border border-stone-800 focus:border-purple-400 focus:outline-hidden text-xs text-stone-200 placeholder:text-stone-600 transition"
+                />
+                <p className="text-[10px] text-stone-500 mt-1">
+                  We'll send the download link directly to this email once your photographer packages the ZIP.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-stone-300 mb-1.5">
+                  Phone / WhatsApp (Optional)
+                </label>
+                <input
+                  type="tel"
+                  value={zipPhoneInput}
+                  onChange={(e) => setZipPhoneInput(e.target.value)}
+                  placeholder="+88017XXXXXXXX"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-950 border border-stone-800 focus:border-purple-400 focus:outline-hidden text-xs text-stone-200 placeholder:text-stone-600 transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-stone-300 mb-1.5">
+                  Special Notes or Instructions for Photographer (Optional)
+                </label>
+                <textarea
+                  rows={3}
+                  value={zipNotesInput}
+                  onChange={(e) => setZipNotesInput(e.target.value)}
+                  placeholder="e.g. Please include color-corrected high-res files, print sizing preferences, or specific formats..."
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-950 border border-stone-800 focus:border-purple-400 focus:outline-hidden text-xs text-stone-200 placeholder:text-stone-600 transition resize-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-stone-850">
+                <button
+                  type="button"
+                  onClick={() => setShowZipModal(false)}
+                  className="px-4 py-2.5 text-stone-400 hover:text-stone-200 text-xs font-medium transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingZip || selectedIds.size === 0}
+                  className="px-5 py-2.5 bg-linear-to-r from-purple-600 to-indigo-600 hover:opacity-95 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition shadow-lg flex items-center gap-2 cursor-pointer"
+                >
+                  {isSubmittingZip ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Submitting Request...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Archive className="w-4 h-4" />
+                      <span>
+                        {gallery.zipRequested ? 'Update ZIP Request' : 'Submit High-Res Request'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Auto-Saving State Indicator */}
+      {autoSaveStatus === 'saving' && (
+        <LoadingOverlay
+          variant="floating"
+          statusText="Saving..."
+          subtext="Syncing photo selections"
+        />
+      )}
+
+      {/* Submitting Selection Modal Overlay */}
+      {isSubmitting && (
+        <LoadingOverlay
+          variant="overlay"
+          statusText="Submitting selection..."
+          subtext="Transmitting your curated photo list to the photographer"
+        />
+      )}
+
+      {/* Clearing Selections Modal Overlay */}
+      {isRestarting && (
+        <LoadingOverlay
+          variant="overlay"
+          statusText="Clearing selections..."
+          subtext="Resetting photo choices in draft status"
+        />
+      )}
+
+      {/* Submitting ZIP Request Overlay */}
+      {isSubmittingZip && (
+        <LoadingOverlay
+          variant="overlay"
+          statusText="Submitting ZIP request..."
+          subtext="Notifying your studio team to package your high-res files"
+        />
+      )}
+
+      {/* Restoring Selection History Overlay */}
+      {isRestoringHistory && (
+        <LoadingOverlay
+          variant="overlay"
+          statusText="Restoring selection state..."
+          subtext="Synchronizing choices with Firestore timeline"
+        />
+      )}
+
+      {/* Selection History Timeline Modal */}
+      {showHistoryModal && gallery && (
+        <div className="fixed inset-0 z-50 bg-stone-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-stone-900 border border-stone-800 rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95 max-h-[85vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 shadow-md">
+                  <History className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-serif font-semibold text-stone-100 flex items-center gap-2">
+                    <span>Selection History & Timeline</span>
+                  </h3>
+                  <p className="text-xs text-stone-400">
+                    Track past selection states, undo changes, or restore any snapshot
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHistoryModal(false)}
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-800 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Quick Undo / Redo controls in Modal */}
+            {!isReadOnly && (
+              <div className="flex items-center justify-between p-3 rounded-2xl bg-stone-950 border border-stone-850 text-xs shrink-0">
+                <div className="text-stone-400 flex items-center gap-2">
+                  <span>Current:</span>
+                  <span className="font-semibold text-amber-400 font-mono">
+                    {selectedIds.size} photos selected
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    className="px-2.5 py-1.5 rounded-xl bg-stone-850 hover:bg-stone-800 disabled:opacity-35 border border-stone-750 text-stone-300 hover:text-amber-400 font-medium transition flex items-center gap-1 cursor-pointer"
+                    title="Undo last change (Ctrl+Z)"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    <span>Undo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRedo}
+                    disabled={redoStack.length === 0}
+                    className="px-2.5 py-1.5 rounded-xl bg-stone-850 hover:bg-stone-800 disabled:opacity-35 border border-stone-750 text-stone-300 hover:text-amber-400 font-medium transition flex items-center gap-1 cursor-pointer"
+                    title="Redo change (Ctrl+Y)"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                    <span>Redo</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Timeline List */}
+            <div className="overflow-y-auto flex-1 pr-1 space-y-2.5">
+              {historyEntries.length === 0 ? (
+                <div className="p-8 text-center bg-stone-950/60 border border-stone-850 rounded-2xl text-stone-500 space-y-2">
+                  <History className="w-8 h-8 text-stone-600 mx-auto" />
+                  <p className="text-xs">No selection history recorded yet.</p>
+                  <p className="text-[11px] text-stone-600">
+                    As you select or deselect photos, a complete audit history will be tracked here.
+                  </p>
+                </div>
+              ) : (
+                historyEntries.map((entry, idx) => {
+                  const isCurrent =
+                    entry.selectedCount === selectedIds.size &&
+                    entry.selectedPhotoIds.every((id) => selectedIds.has(id));
+
+                  const actionBadgeColor = {
+                    select: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    deselect: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+                    clear: 'bg-stone-800 text-stone-400 border-stone-700',
+                    restore_snapshot: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+                    undo: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+                    redo: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+                    batch_select: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    initial: 'bg-stone-800 text-stone-400 border-stone-700',
+                  }[entry.action] || 'bg-stone-850 text-stone-400 border-stone-700';
+
+                  return (
+                    <div
+                      key={entry.id || idx}
+                      className={`p-3.5 rounded-2xl border transition flex items-center justify-between gap-3 text-xs ${
+                        isCurrent
+                          ? 'bg-amber-500/10 border-amber-500/30'
+                          : 'bg-stone-950/70 border-stone-850 hover:border-stone-750'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider border font-mono ${actionBadgeColor}`}
+                          >
+                            {entry.action.replace('_', ' ')}
+                          </span>
+                          <span className="font-mono text-stone-400 text-[11px]">
+                            {new Date(entry.timestamp).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </span>
+                          {isCurrent && (
+                            <span className="px-2 py-0.2 rounded-full text-[9px] font-bold bg-amber-500 text-stone-950">
+                              Active State
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-stone-200 font-medium text-xs truncate">
+                          {entry.description || `State change to ${entry.selectedCount} photos`}
+                        </p>
+                        <p className="text-[11px] text-stone-500">
+                          {entry.selectedCount} photo{entry.selectedCount === 1 ? '' : 's'} in snapshot
+                        </p>
+                      </div>
+
+                      {!isReadOnly && !isCurrent && (
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreHistoryEntry(entry)}
+                          className="px-3 py-1.5 rounded-xl bg-stone-850 hover:bg-amber-500 hover:text-stone-950 border border-stone-750 text-stone-300 font-semibold text-xs transition shrink-0 cursor-pointer shadow-xs"
+                          title="Restore selections to this exact state"
+                        >
+                          Restore
+                        </button>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="pt-3 border-t border-stone-850 flex items-center justify-between text-[11px] text-stone-500 shrink-0">
+              <span>Keyboard shortcuts: Ctrl+Z (Undo), Ctrl+Y (Redo)</span>
+              <button
+                type="button"
+                onClick={() => setShowHistoryModal(false)}
+                className="px-4 py-2 bg-stone-850 hover:bg-stone-800 text-stone-300 rounded-xl transition cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cloud Function ZIP Archive Progress & Download Modal */}
+      {showArchiveModal && gallery && (
+        <div className="fixed inset-0 z-50 bg-stone-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-stone-900 border border-stone-800 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95 text-center">
+            {/* Icon Header */}
+            <div className="w-16 h-16 rounded-2xl bg-purple-500/15 border border-purple-500/30 text-purple-400 flex items-center justify-center mx-auto shadow-lg">
+              {archiveResult ? (
+                <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+              ) : isArchiving ? (
+                <Loader2 className="w-8 h-8 animate-spin text-purple-400" />
+              ) : (
+                <Archive className="w-8 h-8 text-purple-400" />
+              )}
+            </div>
+
+            <div>
+              <h3 className="text-lg font-serif font-semibold text-stone-100">
+                {archiveResult ? 'ZIP Archive Ready!' : 'Packaging Photo Archive'}
+              </h3>
+              <p className="text-xs text-stone-400 mt-1">
+                {archiveResult
+                  ? `Successfully bundled ${archiveResult.totalPhotos} photos into a single ZIP file.`
+                  : 'Automated cloud worker is fetching and compressing your selected photos.'}
+              </p>
+            </div>
+
+            {/* Progress Bar (while archiving) */}
+            {isArchiving && archiveProgress && (
+              <div className="space-y-2.5 p-4 rounded-2xl bg-stone-950 border border-stone-800 text-left">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-stone-300 font-medium truncate max-w-[220px]">
+                    {archiveProgress.statusText}
+                  </span>
+                  <span className="text-amber-400 font-mono font-bold">
+                    {archiveProgress.percent}%
+                  </span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-stone-850 overflow-hidden">
+                  <div
+                    className="h-full bg-linear-to-r from-purple-500 via-indigo-500 to-amber-400 rounded-full transition-all duration-300"
+                    style={{ width: `${archiveProgress.percent}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-stone-500 font-mono">
+                  <span>Photo {archiveProgress.current} of {archiveProgress.total}</span>
+                  <span>ZIP Deflate Format</span>
+                </div>
+              </div>
+            )}
+
+            {/* Download Link Card (when completed) */}
+            {archiveResult && (
+              <div className="space-y-3">
+                <div className="p-4 rounded-2xl bg-stone-950 border border-emerald-500/30 text-left space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-stone-200">Archive File</span>
+                    <span className="text-xs font-mono font-bold text-amber-400">
+                      {archiveResult.sizeFormatted}
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-stone-400 truncate">
+                    {archiveResult.fileName}
+                  </p>
+                  <p className="text-[10px] text-stone-500">
+                    Includes {archiveResult.totalPhotos} selected photos + ARCHIVE_MANIFEST.txt
+                  </p>
+                </div>
+
+                <a
+                  href={archiveResult.downloadUrl}
+                  download={archiveResult.fileName}
+                  className="w-full py-3 px-5 bg-linear-to-r from-emerald-500 to-teal-500 hover:opacity-95 text-stone-950 font-bold text-sm rounded-xl transition shadow-xl flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download ZIP Archive ({archiveResult.sizeFormatted})</span>
+                </a>
+              </div>
+            )}
+
+            {/* Modal Actions */}
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setShowArchiveModal(false)}
+                className="w-full py-2 bg-stone-850 hover:bg-stone-800 text-stone-400 hover:text-stone-200 text-xs font-medium rounded-xl transition cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>

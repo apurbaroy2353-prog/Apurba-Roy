@@ -28,7 +28,7 @@ export const ShareCustomerGalleryModal: React.FC<ShareCustomerGalleryModalProps>
 
   if (!isOpen) return null;
 
-  const galleryUrl = `${window.location.origin}/select/${gallery.secureToken}`;
+  const galleryUrl = `${window.location.origin}/gallery/${gallery.id}`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(galleryUrl);

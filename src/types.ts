@@ -213,6 +213,7 @@ export type CustomerGalleryStatus =
   | 'active'
   | 'selection_in_progress'
   | 'submitted'
+  | 'approved'
   | 'locked'
   | 'expired'
   | 'disabled';
@@ -238,6 +239,30 @@ export interface CustomerPhotoSelection {
   thumbnailUrl?: string;
   selectedAt: string;
   selectionOrder: number;
+}
+
+export type SelectionHistoryAction =
+  | 'select'
+  | 'deselect'
+  | 'batch_select'
+  | 'clear'
+  | 'undo'
+  | 'redo'
+  | 'restore_snapshot'
+  | 'initial';
+
+export interface SelectionHistoryEntry {
+  id: string;
+  projectId: string;
+  action: SelectionHistoryAction;
+  description: string;
+  selectedPhotoIds: string[];
+  selectedCount: number;
+  affectedPhotoId?: string;
+  affectedPhotoName?: string;
+  timestamp: string;
+  sessionId?: string;
+  clientName?: string;
 }
 
 export interface CustomerGallery {
@@ -274,6 +299,17 @@ export interface CustomerGallery {
   collectedFolderId?: string; // Created 'Customer Selected' Google Drive folder ID
   askCustomerName?: boolean; // Optional: prompt for client name on first visit
   askCustomerPhone?: boolean; // Optional: prompt for mobile number on first visit
+  // High-Resolution ZIP request fields
+  zipRequested?: boolean;
+  zipRequestedAt?: string;
+  zipRequestStatus?: 'pending' | 'ready' | 'delivered';
+  zipRequestNotes?: string;
+  zipRequestEmail?: string;
+  zipRequestPhone?: string;
+  zipRequestedCount?: number;
+  zipDownloadUrl?: string;
+  zipFulfilledAt?: string;
+  zipAdminNotes?: string;
 }
 
 export type ClientSessionStatus = 'active' | 'submitted' | 'editing';

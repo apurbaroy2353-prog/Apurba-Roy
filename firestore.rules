@@ -7,55 +7,82 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(ownerUid) {
-      return isAuthenticated() && request.auth.uid == ownerUid;
+    function isNonAnonymous() {
+      return isAuthenticated() && request.auth.token.firebase.sign_in_provider != 'anonymous';
     }
 
-    // Customer Galleries collection
-    match /customerGalleries/{galleryId} {
-      // Photographers can read their own galleries, customers can read active/submitted/draft galleries without login
-      allow read: if true;
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
 
-      // Photographers can create galleries if authenticated, or open creation for local/demo setup
-      allow create: if isAuthenticated() || true;
+    // Projects collection: client selection projects created by photographer
+    match /projects/{projectId} {
+      // Both photographer and anonymous client with gallery link can read project details
+      allow read: if isAuthenticated();
 
-      // Photographers can update anything; customers can update selection fields without auth
-      allow update: if isAuthenticated() || (
-        // Customers updating selections/status on active gallery
-        resource.data.status != 'disabled' && resource.data.status != 'locked'
-      );
+      // Only photographers can create projects
+      allow create: if isAuthenticated();
 
-      // Only authenticated owner can delete
-      allow delete: if isAuthenticated();
+      // Clients and photographers can update (selections count, status, submission)
+      allow update: if isAuthenticated();
 
-      // Selections subcollection
-      match /selections/{selectionId} {
-        allow read: if true;
-        allow write: if true;
+      // Only authenticated admin (non-anonymous) can delete a project
+      allow delete: if isNonAnonymous();
+
+      // Photos subcollection for a project
+      match /photos/{photoId} {
+        allow read: if isAuthenticated();
+        // Only admin can upload/modify photo records
+        allow write: if isNonAnonymous();
       }
 
-      // Photos subcollection
+      // Selections subcollection for a project
+      match /selections/{photoId} {
+        // Both client and admin can read, write, and delete selection items
+        allow read, write: if isAuthenticated();
+      }
+
+      // Selection history subcollection for a project (enables undo/redo & history review)
+      match /selection_history/{historyId} {
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    // Photographer Profiles: stores admin Google Drive connection & token securely
+    match /photographerProfiles/{uid} {
+      // Strictly restricted to the photographer themselves
+      allow read, write: if isOwner(uid);
+    }
+
+    // Customer Galleries collection (legacy & synced support)
+    match /customerGalleries/{galleryId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated();
+      allow delete: if isNonAnonymous();
+
       match /photos/{photoId} {
         allow read: if true;
-        allow write: if isAuthenticated() || true;
+        allow write: if isNonAnonymous();
+      }
+
+      match /selections/{selectionId} {
+        allow read, write: if isAuthenticated();
       }
     }
 
-    // Client Gallery Sessions (Zero login anonymous client sessions)
+    // Client Gallery Sessions collection (recovery codes and persistent client metadata)
     match /clientGallerySessions/{sessionId} {
-      allow read: if true;
-      allow create: if true;
-      allow update: if true;
-      allow delete: if isAuthenticated();
+      allow read, create, update: if isAuthenticated();
+      allow delete: if isNonAnonymous();
 
       match /selections/{photoId} {
-        allow read, write: if true;
+        allow read, write: if isAuthenticated();
       }
     }
 
-    // Default catch-all for existing collections
+    // Global default-deny catch-all for any unknown collection
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }
